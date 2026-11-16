@@ -129,6 +129,13 @@ details.more[open] { padding-block-end: 4px; }
 .conflict-vals { display: grid; gap: 2px; font-size: 14px; }
 .conflict-actions { display: flex; gap: 8px; }
 
+.shot { display: grid; gap: 6px; margin-block-end: 16px; }
+.shot-btn { min-height: 48px; font-size: 16px; }
+.src-badge { font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 999px; margin-inline-start: 6px; white-space: nowrap; }
+.src-badge.screenshot { background: var(--amber-bg); color: var(--amber); }
+.src-badge.gov { background: #e8f0fe; color: var(--accent); }
+label.from-shot input, label.from-shot select, label.from-shot textarea { border-color: #e0b84a; background: #fffbea; }
+
 .seller {
   border: 1px solid var(--line); border-radius: var(--radius); padding: 12px;
   margin-block-end: 20px; display: grid; gap: 8px; background: var(--soft);

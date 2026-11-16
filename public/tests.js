@@ -6,7 +6,8 @@ import { scoreCar, band, num, ENUMS, DEAL_BREAKERS, WEIGHTS } from './scoring.js
 import { FIELDS, sanitizeCar } from './fields.js';
 import { STRINGS, SELLER } from './i18n.js';
 import { buildSellerMessage, waNumber, waLink } from './seller.js';
-import { mapGov, mergeGov, stripCountry, normYm } from './govmap.js';
+import { mapGov, mergeGov, mergeFields, stripCountry, normYm } from './govmap.js';
+import { normalizeExtraction, validateImages, buildGeminiRequest, buildAnthropicRequest, parseGeminiResponse, parseAnthropicResponse, EXTRACT_SCHEMA } from './extraction.js';
 
 const AS_OF = '2026-11-16';
 const S = (car) => scoreCar(car, { asOf: AS_OF });
@@ -426,6 +427,70 @@ test('Merge', 'same value in different case is not a conflict', () =>
   eq(mergeGov({ model: 'Octavia' }, { model: 'OCTAVIA' }).conflicts, []));
 test('Merge', 'structural flag is always taken from gov (no conflict)', () =>
   eq(mergeGov({ govStructuralChange: false }, { govStructuralChange: true }).car.govStructuralChange, true));
+
+// ---------------- Screenshot extraction ----------------
+
+const MODEL_OUT = {
+  plate: '12-345-67', make: 'טויוטה', model: 'קורולה', trim: 'Sun', year: 2022, firstRegistration: '2022-1',
+  currentKm: '86,000', askingPrice: 98000, handCount: 1, originalOwnership: 'private_lease', testExpiry: '2027-03',
+  tires: 'excellent', sellerPhone: '050-1234567', notes: 'ללא תאונות, טיפולים בסוכנות',
+  insuranceClaims: 'none', // not in schema: must be dropped
+};
+test('Extract', 'model output is cleaned into car fields', () => {
+  const f = normalizeExtraction(MODEL_OUT);
+  eq([f.plate, f.make, f.model, f.year, f.firstRegistration, f.currentKm, f.askingPrice, f.handCount, f.originalOwnership, f.sellerPhone],
+    ['1234567', 'טויוטה', 'קורולה', 2022, '2022-01', 86000, 98000, 1, 'private_lease', '0501234567']);
+});
+test('Extract', 'month-only test date → 1st of month (worst case); invalid enum → null', () => {
+  const f = normalizeExtraction(MODEL_OUT);
+  eq([f.testExpiry, f.tires], ['2027-03-01', null]);
+});
+test('Extract', 'seller claims about accidents/service never fill scored fields', () => {
+  const f = normalizeExtraction(MODEL_OUT);
+  eq(['insuranceClaims' in f, 'serviceHistory' in f, f.notes], [false, false, 'ללא תאונות, טיפולים בסוכנות']);
+});
+test('Extract', 'implausible numbers and garbage → null', () => {
+  const f = normalizeExtraction({ year: 1800, handCount: 0, plate: '12', currentKm: 'lots' });
+  eq([f.year, f.handCount, f.plate, f.currentKm], [null, null, null, null]);
+  eq(normalizeExtraction(null).make, null);
+});
+test('Extract', 'schema requires every field and allows null', () => {
+  eq(EXTRACT_SCHEMA.required.length, Object.keys(EXTRACT_SCHEMA.properties).length);
+  eq(Object.values(EXTRACT_SCHEMA.properties).every((p) => p.type.includes('null')), true);
+});
+test('Extract', 'image validation', () => {
+  const ok = { mimeType: 'image/jpeg', data: 'QUJD'.repeat(40) };
+  eq([validateImages([ok]), validateImages([]), validateImages([{ ...ok, mimeType: 'image/gif' }]),
+    validateImages([{ ...ok, data: 'not base64!' }]), validateImages(Array(7).fill(ok)), validateImages([{ ...ok, data: 'QUJD' }])],
+  [null, 'No images', 'Unsupported image type', 'Image data must be base64', 'At most 6 images', 'Image is empty']);
+});
+test('Extract', 'Gemini request: images inline, JSON schema output', () => {
+  const r = buildGeminiRequest([{ mimeType: 'image/png', data: 'QUJD' }]);
+  eq(r.contents[0].parts[1], { inlineData: { mimeType: 'image/png', data: 'QUJD' } });
+  eq([r.generationConfig.responseMimeType, r.generationConfig.responseJsonSchema === EXTRACT_SCHEMA], ['application/json', true]);
+});
+test('Extract', 'Anthropic request: forced tool call with the schema', () => {
+  const r = buildAnthropicRequest([{ mimeType: 'image/png', data: 'QUJD' }], 'm');
+  eq([r.model, r.tool_choice, r.tools[0].input_schema === EXTRACT_SCHEMA, r.messages[0].content[0].source.media_type],
+    ['m', { type: 'tool', name: 'record_listing' }, true, 'image/png']);
+});
+test('Extract', 'parse Gemini response (also tolerates a ```json fence)', () => {
+  eq(parseGeminiResponse({ candidates: [{ content: { parts: [{ text: '{"make":"Kia"}' }] } }] }), { make: 'Kia' });
+  eq(parseGeminiResponse({ candidates: [{ content: { parts: [{ text: '```json\n{"make":"Kia"}\n```' }] } }] }), { make: 'Kia' });
+});
+test('Extract', 'parse Gemini errors: blocked / empty', () => {
+  let m1 = '', m2 = '';
+  try { parseGeminiResponse({ promptFeedback: { blockReason: 'SAFETY' } }); } catch (e) { m1 = e.message; }
+  try { parseGeminiResponse({ candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [] } }] }); } catch (e) { m2 = e.message; }
+  eq([m1.includes('SAFETY'), m2.includes('MAX_TOKENS')], [true, true]);
+});
+test('Extract', 'parse Anthropic tool_use response', () =>
+  eq(parseAnthropicResponse({ content: [{ type: 'text', text: 'x' }, { type: 'tool_use', name: 'record_listing', input: { make: 'Kia' } }] }), { make: 'Kia' }));
+test('Extract', 'screenshot values merge like gov: fill empty, conflict otherwise, source = screenshot', () => {
+  const { car, filled, conflicts } = mergeFields({ make: 'Toyota', fieldSources: {} }, normalizeExtraction(MODEL_OUT), 'screenshot');
+  eq(conflicts.map((c) => c.key), ['make']);
+  eq([filled.includes('model'), car.fieldSources.model, car.make], [true, 'screenshot', 'Toyota']);
+});
 
 // ---------------- runner ----------------
 

@@ -136,12 +136,12 @@ function same(key, a, b) {
 }
 
 /**
- * Merge gov fields into a car/draft. Gov fills only empty fields; where the
+ * Merge fields from gov or a screenshot into a car/draft. They fill only empty fields; where the
  * car already has a different value, it is reported as a conflict and left
  * untouched. govStructuralChange is gov-only and always taken.
  * Returns { car, filled: [key], conflicts: [{ key, mine, gov }] }.
  */
-export function mergeGov(car, govFields) {
+export function mergeFields(car, govFields, source) {
   const out = { ...car, fieldSources: { ...(car.fieldSources || {}) } };
   const filled = [];
   const conflicts = [];
@@ -151,13 +151,13 @@ export function mergeGov(car, govFields) {
     if (!f) continue;
     if (key === 'govStructuralChange') {
       out[key] = gov;
-      out.fieldSources[key] = 'gov';
+      out.fieldSources[key] = source;
       continue;
     }
     const mine = cleanValue(f.type, out[key], f.arg);
     if (mine === null) {
       out[key] = gov;
-      out.fieldSources[key] = 'gov';
+      out.fieldSources[key] = source;
       filled.push(key);
     } else if (!same(key, mine, gov)) {
       conflicts.push({ key, mine, gov });
@@ -165,3 +165,5 @@ export function mergeGov(car, govFields) {
   }
   return { car: out, filled, conflicts };
 }
+
+export const mergeGov = (car, fields) => mergeFields(car, fields, 'gov');

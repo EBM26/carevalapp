@@ -3,7 +3,8 @@ import { scoreCar, ENUMS, DEAL_BREAKERS, num } from './scoring.js';
 import { FIELDS, sanitizeCar, cleanValue } from './fields.js';
 import { STRINGS } from './i18n.js';
 import { buildSellerMessage, waLink } from './seller.js';
-import { mergeGov } from './govmap.js';
+import { mergeGov, mergeFields } from './govmap.js';
+import { MAX_IMAGES } from './extraction.js';
 
 // ---------- storage (per-device conveniences only; D1 is the source of truth) ----------
 const store = {
@@ -375,13 +376,33 @@ async function renderForm(id) {
     renderForm(id);
   }
 
-  function resolveConflict(c, useGov) {
-    if (useGov) {
+  // Shared by gov lookup and screenshot import. stateKey: 'gov' | 'shot'.
+  const SOURCE_OF = { gov: 'gov', shot: 'screenshot' };
+  function resolveConflict(stateKey, c, useTheirs) {
+    if (useTheirs) {
       draft[c.key] = c.gov;
-      draft.fieldSources = { ...draft.fieldSources, [c.key]: 'gov' };
+      draft.fieldSources = { ...draft.fieldSources, [c.key]: SOURCE_OF[stateKey] };
     }
-    form.gov.conflicts = form.gov.conflicts.filter((x) => x !== c);
-    if (useGov) renderForm(id); else renderGov();
+    form[stateKey].conflicts = form[stateKey].conflicts.filter((x) => x !== c);
+    if (useTheirs) renderForm(id); else (stateKey === 'gov' ? renderGov() : renderShot());
+  }
+
+  function conflictList(stateKey) {
+    const st = form[stateKey];
+    if (!st?.conflicts?.length) return [];
+    const p = stateKey === 'gov' ? { title: 'gov.conflicts', theirs: 'gov.gov', use: 'gov.useGov' }
+      : { title: 'shot.conflicts', theirs: 'shot.theirs', use: 'shot.useTheirs' };
+    return [
+      h('strong', {}, t(p.title)),
+      ...st.conflicts.map((c) => h('div.conflict', {},
+        h('div.conflict-label', {}, t(`field.${c.key}`)),
+        h('div.conflict-vals', {},
+          h('span', {}, t('gov.yours'), ': ', h('bdi', { dir: 'auto' }, displayValue(c.key, c.mine))),
+          h('span', {}, t(p.theirs), ': ', h('bdi', { dir: 'auto' }, displayValue(c.key, c.gov)))),
+        h('div.conflict-actions', {},
+          h('button.btn.small', { type: 'button', onclick: () => resolveConflict(stateKey, c, false) }, t('gov.useMine')),
+          h('button.btn.small', { type: 'button', onclick: () => resolveConflict(stateKey, c, true) }, t(p.use))))),
+    ];
   }
 
   function renderGov() {
@@ -401,22 +422,54 @@ async function renderForm(id) {
       if (x.colorChanged) kids.push(h('div.note', {}, t('gov.extra.colorChanged')));
       if (x.tiresChanged) kids.push(h('div.note', {}, t('gov.extra.tiresChanged')));
       if (x.personalImport) kids.push(h('div.note', {}, t('gov.extra.personalImport')));
-      if (g.conflicts?.length) {
-        kids.push(h('strong', {}, t('gov.conflicts')));
-        for (const c of g.conflicts) {
-          kids.push(h('div.conflict', {},
-            h('div.conflict-label', {}, t(`field.${c.key}`)),
-            h('div.conflict-vals', {},
-              h('span', {}, t('gov.yours'), ': ', h('bdi', { dir: 'auto' }, displayValue(c.key, c.mine))),
-              h('span', {}, t('gov.gov'), ': ', h('bdi', { dir: 'auto' }, displayValue(c.key, c.gov)))),
-            h('div.conflict-actions', {},
-              h('button.btn.small', { type: 'button', onclick: () => resolveConflict(c, false) }, t('gov.useMine')),
-              h('button.btn.small', { type: 'button', onclick: () => resolveConflict(c, true) }, t('gov.useGov')))));
-        }
-      }
+      kids.push(...conflictList('gov'));
     }
     govBox.replaceChildren(...kids.filter(Boolean));
   }
+
+  // ----- screenshot import -----
+  const shotBox = h('section.shot');
+  const shotInput = h('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true, onchange: importShots });
+
+  async function importShots(e) {
+    const files = [...e.target.files];
+    e.target.value = '';
+    if (!files.length) return;
+    if (files.length > MAX_IMAGES) { form.shot = { status: 'error', message: t('shot.tooMany', { n: MAX_IMAGES }) }; renderShot(); return; }
+    const session = form;
+    form.shot = { status: 'loading', n: files.length };
+    renderShot();
+    try {
+      // Wrapped: map() would pass the index as fileToJpeg's maxSide argument.
+      const images = await Promise.all(files.map((f) => fileToJpeg(f)));
+      const res = await api('POST', '/api/extract', { images });
+      if (form !== session) return;
+      const m = mergeFields(draft, res.fields, 'screenshot');
+      Object.assign(draft, m.car);
+      form.shot = { status: 'done', filled: m.filled, conflicts: m.conflicts };
+    } catch (err) {
+      if (form !== session) return;
+      form.shot = { status: 'error', message: t('shot.error', { msg: err.message }) };
+    }
+    renderForm(id);
+  }
+
+  function renderShot() {
+    const s = form.shot || { status: 'idle' };
+    const kids = [
+      shotInput,
+      h('button.btn.primary.shot-btn', { type: 'button', disabled: s.status === 'loading', onclick: () => shotInput.click() },
+        s.status === 'loading' ? t('shot.reading', { n: s.n }) : t('shot.import')),
+    ];
+    if (s.status === 'idle') kids.push(h('div.note', {}, t('shot.hint')));
+    if (s.status === 'error') kids.push(h('div.warn-soft', {}, s.message));
+    if (s.status === 'done') {
+      kids.push(h('div.note', {}, t(s.filled.length || s.conflicts.length ? 'shot.applied' : 'shot.none', { n: s.filled.length })));
+      kids.push(...conflictList('shot'));
+    }
+    shotBox.replaceChildren(...kids);
+  }
+
   const ownersBox = h('div.grid.full', { style: 'grid-column:1/-1' });
   const suggestBox = h('div.suggest');
 
@@ -445,7 +498,10 @@ async function renderForm(id) {
       else attrs.type = 'text';
       input = h('input', attrs);
     }
-    return h(`label.field${mod === 'full' ? '.full' : ''}`, {}, h('span', {}, t(`field.${key}`)), input,
+    const src = draft.fieldSources?.[key];
+    const badge = src === 'screenshot' || src === 'gov' ? h(`span.src-badge.${src}`, {}, t(`src.${src}`)) : null;
+    return h(`label.field${mod === 'full' ? '.full' : ''}${src === 'screenshot' ? '.from-shot' : ''}`, {},
+      h('span', {}, t(`field.${key}`), badge), input,
       key === 'cabinFit' ? suggestBox : null);
   };
 
@@ -482,6 +538,9 @@ async function renderForm(id) {
       draft.fieldSources = { ...draft.fieldSources, ownershipHistory: 'manual' };
     } else if (name in FIELD_BY_KEY) {
       draft[name] = e.target.value;
+      const lbl = e.target.closest('label.field');
+      lbl?.classList.remove('from-shot');
+      lbl?.querySelector('.src-badge')?.remove();
       draft.fieldSources = { ...draft.fieldSources, [name]: 'manual' };
     } else return;
     if (name === 'handCount') renderOwners();
@@ -592,14 +651,43 @@ async function renderForm(id) {
   renderOwners();
   renderSuggest();
   renderGov();
+  renderShot();
   renderPanel();
   view.replaceChildren(
     h('div.form-head', {}, h('h1', {}, t(id ? 'editCar' : 'newCar')), h('a.btn.ghost', { href: '#/' }, t('back'))),
     panel,
+    shotBox,
     details,
     sellerBox,
     formEl,
   );
+}
+
+/** Downscale and re-encode an image file → { mimeType, data(base64) }. Keeps uploads small. */
+async function fileToJpeg(file, maxSide = 2000, quality = 0.82) {
+  let src;
+  let w;
+  let hgt;
+  try {
+    src = await createImageBitmap(file);
+    w = src.width; hgt = src.height;
+  } catch {
+    src = new Image();
+    const url = URL.createObjectURL(file);
+    src.src = url;
+    await src.decode();
+    URL.revokeObjectURL(url);
+    w = src.naturalWidth; hgt = src.naturalHeight;
+  }
+  const scale = Math.min(1, maxSide / Math.max(w, hgt));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(w * scale);
+  canvas.height = Math.round(hgt * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+  return { mimeType: 'image/jpeg', data: canvas.toDataURL('image/jpeg', quality).split(',')[1] };
 }
 
 async function copyText(text, textarea) {
