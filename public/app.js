@@ -9,6 +9,8 @@ import { verdict } from './verdict.js';
 import { summarize } from './summary.js';
 import { formatPlate } from './format.js';
 import { modelKey } from './modelnotes.js';
+import { matchModel } from './modelmatch.js';
+import { registryMismatches, valueKey } from './govcompare.js';
 import { quickCheck, resolveComparison, estimateKey, QUICK_CHECK_UNTIL, VERDICT_ORDER, VERDICT_TONE } from './quickcheck.js';
 
 // ---------- storage (per-device conveniences only; D1 is the source of truth) ----------
@@ -209,6 +211,15 @@ function verdictBadge(v, short = true) {
 /** The API's quota/overload answer (HTTP 429 { error: 'ai_limit' }). */
 const isAiLimit = (e) => e?.data?.error === 'ai_limit';
 
+/** Loading placeholder for AI work: shimmer + label, or a static "Working…" with reduced motion. */
+function skeleton(labelKey) {
+  return h('div.skel', { role: 'status' },
+    h('div.skel-block', { 'aria-hidden': 'true' }),
+    h('span.skel-label.motion', {}, t(labelKey)),
+    h('span.skel-label.still', {}, t('load.working')));
+}
+const spinner = () => h('span.spinner', { 'aria-hidden': 'true' });
+
 const hasFlag = (r) => r.dealBreakers.confirmed.length > 0 || r.warnings.length > 0;
 
 // ---------- quick check (stage 1) ----------
@@ -385,22 +396,8 @@ async function importJson(e) {
   }
 }
 
-// ---------- cabin-fit suggestion ----------
-const norm = (s) => String(s || '').toLowerCase().replace(/[\s'"׳״\-_.]/g, '');
-
-function suggestFit(car) {
-  const hay = norm(`${car.make || ''} ${car.model || ''} ${car.trim || ''}`);
-  if (!hay) return null;
-  let best = null;
-  let bestLen = 0;
-  for (const m of models) {
-    for (const s of m.match) {
-      const n = norm(s);
-      if (n.length > bestLen && hay.includes(n)) { best = m; bestLen = n.length; }
-    }
-  }
-  return best;
-}
+// ---------- model list (cabin fit) ----------
+const suggestFit = (car) => matchModel(models, car);
 
 async function loadModels() {
   try {
@@ -487,7 +484,7 @@ async function renderForm(id) {
       draft = structuredClone(car);
     }
     // Seller message language defaults to Hebrew regardless of the UI language.
-    form = { id, draft, sellerLang: 'he', notes: null, seller: { status: 'idle', text: '', version: 0 }, estimate: null };
+    form = { id, draft, sellerLang: 'he', notes: null, seller: { status: 'idle', text: '', version: 0 }, estimate: null, gov: null, govPlate: null, govResolved: {} };
     const ek = estimateKey(draft);
     if (draft.priceEstimate && ek && draft.priceEstimate.key === ek) {
       const pe = draft.priceEstimate;
@@ -500,13 +497,13 @@ async function renderForm(id) {
   }
   const draft = form.draft;
   view.classList.add('editing');
+  autoCabin(); // fills cabin fit from the model list when it's unknown (declared below, hoisted)
 
   const panel = h('aside.panel', { 'aria-label': t('panel.title') });
   const sellerBox = h('section.panel-sec.seller');
   const govBox = h('div.gov-box');
   const shotStatus = h('div.start-status', { 'aria-live': 'polite' });
   const ownersBox = h('div.field.full.owners');
-  const suggestBox = h('div.suggest');
   const benchBox = h('div.field.full.bench');
   const pointsEls = {};
   const headPlate = h('span.head-plate', {}, plateBadge(draft.plate, 'lg'));
@@ -521,29 +518,115 @@ async function renderForm(id) {
     return String(v);
   }
 
-  // ----- gov lookup -----
-  async function fetchGov() {
+  // ----- gov lookup: automatic, 600 ms after the plate becomes valid -----
+  function scheduleGov() {
+    clearTimeout(form.govTimer);
     const plate = cleanValue('plate', draft.plate);
-    if (!plate) { form.gov = { status: 'error', message: t('gov.needPlate') }; renderGov(); return; }
+    if (!plate || plate === form.govPlate) return;
+    form.govTimer = setTimeout(() => form.fetchGov(), 600);
+  }
+
+  async function fetchGov(force = false) {
+    const plate = cleanValue('plate', draft.plate);
+    if (!plate || (!force && plate === form.govPlate)) return;
+    form.govPlate = plate;
     form.gov = { status: 'loading' };
     renderGov();
     const session = form;
     try {
       const res = await api('GET', `/api/gov?plate=${plate}`);
-      if (form !== session) return; // user left the form while the lookup ran
+      if (form !== session || cleanValue('plate', draft.plate) !== plate) return;
       if (!res.found) {
-        form.gov = { status: 'notFound', failed: res.failed };
+        form.gov = { status: res.failed?.length === 3 ? 'error' : 'notFound' };
       } else {
-        const m = mergeGov(draft, res.fields);
-        Object.assign(draft, m.car);
-        form.gov = { status: 'done', filled: m.filled, conflicts: m.conflicts, hints: res.hints, extra: res.extra, failed: res.failed };
+        // Registry values fill empty fields silently; differences show inline.
+        Object.assign(draft, mergeGov(draft, res.fields).car);
+        autoCabin();
+        form.gov = { status: 'done', fields: res.fields, hints: res.hints, extra: res.extra, failed: res.failed };
       }
-    } catch (e) {
+    } catch {
       if (form !== session) return;
-      const failed = e.data?.failed;
-      form.gov = { status: 'error', message: failed ? t('gov.unavailable', { msg: failed.map((f) => f.reason).join('; ') }) : e.message };
+      form.gov = { status: 'error' };
     }
     renderForm(id); // filled inputs show their new values
+  }
+
+  function renderGov() {
+    const g = form.gov || { status: 'idle' };
+    const kids = [];
+    if (g.status === 'error') kids.push(h('div.warn-text', {}, t('gov.failed')));
+    if (g.status === 'notFound') kids.push(h('div.note', {}, t('gov.notFound')));
+    if (g.status === 'done') {
+      if (g.failed?.length) kids.push(h('div.note', {}, t('gov.partial', { list: g.failed.map((f) => t(`gov.ds.${f.dataset}`)).join(', ') })));
+      for (const hint of g.hints || []) kids.push(h('div.note', {}, t(`gov.hint.${hint.code}`, hint)));
+      const x = g.extra || {};
+      if (x.colorChanged) kids.push(h('div.note', {}, t('gov.extra.colorChanged')));
+      if (x.tiresChanged) kids.push(h('div.note', {}, t('gov.extra.tiresChanged')));
+      if (x.personalImport) kids.push(h('div.note', {}, t('gov.extra.personalImport')));
+    }
+    govBox.replaceChildren(...kids);
+    govBox.hidden = !kids.length;
+    const busy = g.status === 'loading';
+    const status = view.querySelector('.plate-status');
+    if (status) status.replaceChildren(...(busy ? [spinner(), h('span', {}, t('gov.checking'))] : []));
+    const refresh = view.querySelector('.gov-refresh');
+    if (refresh) refresh.hidden = busy || !['done', 'notFound', 'error'].includes(g.status);
+  }
+
+  // ----- registry mismatches, shown inline under each field -----
+  function mmValue(key, v) {
+    if (key === 'handCount') return Number(v) === 1 ? t('mm.handOne') : t('mm.hands', { n: v });
+    if (key === 'testExpiry') return String(v).slice(0, 7);
+    return displayValue(key, v);
+  }
+
+  function renderMismatches(list) {
+    formEl.querySelectorAll('.mm').forEach((el) => el.replaceChildren());
+    for (const m of list) {
+      const slot = formEl.querySelector(`.mm[data-mm="${m.key}"]`);
+      if (!slot) continue;
+      if (m.odometer) {
+        slot.replaceChildren(h('div.mm-line.bad', {}, ltrNums(t('mm.odometer', { ad: fmt.format(m.mine), gov: fmt.format(m.gov) }))));
+        continue;
+      }
+      const fromAd = draft.fieldSources?.[m.key] === 'screenshot';
+      slot.replaceChildren(
+        h('div.mm-line', {},
+          h('span', {}, t(fromAd ? 'mm.ad' : 'mm.you'), ': ', h('bdi', { dir: 'auto' }, mmValue(m.key, m.mine))),
+          ' · ',
+          h('span', {}, t('mm.registry'), ': ', h('bdi', { dir: 'auto' }, mmValue(m.key, m.gov)))),
+        h('div.mm-actions', {},
+          h('button.btn.small', { type: 'button', onclick: () => {
+            form.govResolved = { ...form.govResolved, [m.key]: valueKey(m.gov) };
+            renderPanel();
+          } }, t(fromAd ? 'mm.keepAd' : 'mm.keepMine')),
+          h('button.btn.small', { type: 'button', onclick: () => {
+            draft[m.key] = m.gov;
+            draft.fieldSources = { ...draft.fieldSources, [m.key]: 'gov' };
+            renderForm(id);
+          } }, t('mm.useRegistry'))));
+    }
+  }
+
+  // ----- cabin fit from the model list (your own choice always wins) -----
+  function autoCabin() {
+    const src = draft.fieldSources?.cabinFit;
+    if (src === 'manual' || (draft.cabinFit && !src)) return false;
+    const m = suggestFit(draft);
+    const next = m ? m.fit : null;
+    if ((draft.cabinFit || null) === next) return false;
+    const fs = { ...draft.fieldSources };
+    if (next) { draft.cabinFit = next; fs.cabinFit = 'model_list'; } else { draft.cabinFit = null; delete fs.cabinFit; }
+    draft.fieldSources = fs;
+    return true;
+  }
+
+  function refreshField(key, spec) {
+    const old = formEl.querySelector(`[data-field="${key}"]`);
+    if (!old) return;
+    const fresh = fieldEl(spec);
+    old.replaceWith(fresh);
+    fitSegs(fresh);
   }
 
   // Shared by gov lookup and screenshot import. stateKey: 'gov' | 'shot'.
@@ -575,29 +658,6 @@ async function renderForm(id) {
     ];
   }
 
-  function renderGov() {
-    const g = form.gov || { status: 'idle' };
-    const kids = [];
-    const failedNote = g.failed?.length
-      ? h('div.warn-text', {}, t('gov.partial', { list: g.failed.map((f) => t(`gov.ds.${f.dataset}`)).join(', ') }))
-      : null;
-    if (g.status === 'error') kids.push(h('div.warn-text', {}, g.message));
-    if (g.status === 'notFound') kids.push(h('div.note', {}, t('gov.notFound')), failedNote);
-    if (g.status === 'done') {
-      kids.push(h('div.note', {}, t('gov.applied', { n: g.filled.length })), failedNote);
-      for (const hint of g.hints || []) kids.push(h('div.note', {}, t(`gov.hint.${hint.code}`, hint)));
-      const x = g.extra || {};
-      if (x.colorChanged) kids.push(h('div.note', {}, t('gov.extra.colorChanged')));
-      if (x.tiresChanged) kids.push(h('div.note', {}, t('gov.extra.tiresChanged')));
-      if (x.personalImport) kids.push(h('div.note', {}, t('gov.extra.personalImport')));
-      kids.push(...conflictList('gov'));
-    }
-    govBox.replaceChildren(...kids.filter(Boolean));
-    govBox.hidden = !govBox.childElementCount;
-    const btn = view.querySelector('.gov-btn');
-    if (btn) { btn.disabled = g.status === 'loading'; btn.textContent = t(g.status === 'loading' ? 'gov.loading' : 'gov.fetch'); }
-  }
-
   // ----- screenshot import -----
   const shotInput = h('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true, onchange: importShots });
 
@@ -606,8 +666,13 @@ async function renderForm(id) {
     e.target.value = '';
     if (!files.length) return;
     if (files.length > MAX_IMAGES) { form.shot = { status: 'error', message: t('shot.tooMany', { n: MAX_IMAGES }) }; renderShot(); return; }
+    for (const u of form.shot?.thumbs || []) URL.revokeObjectURL(u);
+    runExtraction(files, files.map((f) => URL.createObjectURL(f)));
+  }
+
+  async function runExtraction(files, thumbs) {
     const session = form;
-    form.shot = { status: 'loading', n: files.length };
+    form.shot = { status: 'loading', files, thumbs };
     renderShot();
     try {
       // Wrapped: map() would pass the index as fileToJpeg's maxSide argument.
@@ -616,19 +681,29 @@ async function renderForm(id) {
       if (form !== session) return;
       const m = mergeFields(draft, res.fields, 'screenshot');
       Object.assign(draft, m.car);
-      form.shot = { status: 'done', filled: m.filled, conflicts: m.conflicts, noteUntil: Date.now() + 5000 };
+      autoCabin();
+      form.shot = { status: 'done', files, thumbs, filled: m.filled, conflicts: m.conflicts, noteUntil: Date.now() + 5000 };
+      form.pulseKeys = m.filled; // filled fields pulse once after the re-render
     } catch (err) {
       if (form !== session) return;
-      form.shot = { status: 'error', message: isAiLimit(err) ? t('ai.limit') : t('shot.error', { msg: err.message }) };
+      form.shot = { status: 'error', files, thumbs, message: isAiLimit(err) ? t('ai.limit') : t('shot.errorShort'), detail: err.message };
     }
     renderForm(id);
   }
 
   function renderShot() {
     const s = form.shot || { status: 'idle' };
+    const loading = s.status === 'loading';
     const kids = [];
-    if (s.status === 'loading') kids.push(h('div.note', {}, t('shot.reading', { n: s.n })));
-    if (s.status === 'error') kids.push(h('div.warn-text', {}, s.message));
+    if (s.thumbs?.length) {
+      kids.push(h('div.thumbs', {}, s.thumbs.map((url, i) =>
+        h(`div.thumb${loading ? '.shimmer' : ''}`, {}, h('img', { src: url, alt: t('shot.thumbAlt', { n: i + 1 }) })))));
+    }
+    if (loading) kids.push(h('div.reading', { role: 'status' }, spinner(), h('span', {}, t('shot.readingStatus'))));
+    if (s.status === 'error') {
+      kids.push(h('div.shot-error', {}, h('span.warn-text', { title: s.detail || null }, s.message),
+        s.files?.length ? h('button.btn.small', { type: 'button', onclick: () => runExtraction(s.files, s.thumbs) }, t('shot.retry')) : null));
+    }
     if (s.status === 'done') {
       const left = s.noteUntil - Date.now();
       if (left > 0) {
@@ -640,7 +715,7 @@ async function renderForm(id) {
     }
     shotStatus.replaceChildren(...kids);
     const upBtn = view.querySelector('.start-upload');
-    if (upBtn) upBtn.disabled = s.status === 'loading';
+    if (upBtn) upBtn.disabled = loading;
   }
 
   // ----- fields -----
@@ -648,6 +723,7 @@ async function renderForm(id) {
     const src = draft.fieldSources?.[key];
     if (src === 'screenshot') return h('span.src-tag', {}, t('src.screenshotTag'));
     if (src === 'gov') return h('span.src-tag.gov', {}, t('src.govTag'));
+    if (src === 'model_list') return h('span.src-tag.gov', {}, t('src.model_listTag'));
     return null;
   }
 
@@ -665,7 +741,8 @@ async function renderForm(id) {
       h('span.label', { id: labelId }, t(`field.${key}`), srcTag(key)),
       control,
       HINTS[key] ? h('span.hint', {}, t(HINTS[key])) : null,
-      extra || null);
+      extra || null,
+      h('div.mm', { 'data-mm': key, 'aria-live': 'polite' }));
   }
 
   function textInput(key) {
@@ -696,8 +773,8 @@ async function renderForm(id) {
     if (key === 'dealBreakers') return dealBreakerControls();
     if (key === 'plate') {
       const input = textInput('plate');
-      const btn = h('button.btn.gov-btn', { type: 'button', onclick: fetchGov }, t('gov.fetch'));
-      return wrapField('plate', 'full', h('span.plate-row', {}, input, btn), govBox);
+      const refresh = h('button.btn.link.small.gov-refresh', { type: 'button', hidden: true, onclick: () => form.fetchGov(true) }, t('gov.refresh'));
+      return wrapField('plate', 'full', h('span.plate-row', {}, input, h('span.plate-status', { 'aria-live': 'polite' }), refresh), govBox);
     }
     if (key === 'notes') {
       return wrapField(key, mod, h('textarea', { name: key, dir: 'auto', value: draft.notes ?? '', rows: 3 }));
@@ -706,7 +783,7 @@ async function renderForm(id) {
     if (SEG_FIELDS.has(key)) {
       const opts = f.arg.map((v) => [v, enumLabel(key, v)]);
       if (key !== 'status') opts.push(['', t('unknown')]);
-      return wrapField(key, mod, seg(key, opts, draft[key] ?? ''), key === 'cabinFit' ? suggestBox : null);
+      return wrapField(key, mod, seg(key, opts, draft[key] ?? ''));
     }
     return wrapField(key, mod, textInput(key));
   }
@@ -732,25 +809,6 @@ async function renderForm(id) {
     ownersBox.replaceChildren(...kids);
     ownersBox.hidden = !kids.length;
     fitSegs(ownersBox);
-  }
-
-  function renderSuggest() {
-    const s = suggestFit(draft);
-    if (!s || s.fit === draft.cabinFit) { suggestBox.replaceChildren(); return; }
-    suggestBox.replaceChildren(
-      h('span', {}, t('cabinSuggest', { fit: t(`cabinFit.${s.fit}`) }), ' (', h('bdi', {}, s.name), ')'),
-      h('button.btn.small', {
-        type: 'button',
-        onclick: () => {
-          draft.cabinFit = s.fit;
-          draft.fieldSources = { ...draft.fieldSources, cabinFit: 'manual' };
-          const radio = formEl.querySelector(`input[name="cabinFit"][value="${s.fit}"]`);
-          if (radio) radio.checked = true;
-          renderSuggest();
-          renderPanel();
-        },
-      }, t('apply')),
-    );
   }
 
   function dealBreakerControls() {
@@ -819,8 +877,8 @@ async function renderForm(id) {
     } else return;
     if (name === 'handCount') renderOwners();
     if (name === 'benchmarkSource') { renderBenchmark(); fitSegs(benchBox); }
-    if (name === 'plate') headPlate.replaceChildren(plateBadge(draft.plate, 'lg'));
-    if (['make', 'model', 'trim', 'cabinFit'].includes(name)) renderSuggest();
+    if (name === 'plate') { headPlate.replaceChildren(plateBadge(draft.plate, 'lg')); scheduleGov(); }
+    if (['make', 'model', 'trim'].includes(name) && autoCabin()) refreshField('cabinFit', 'cabinFit:full');
     renderPanel();
   }
 
@@ -840,22 +898,21 @@ async function renderForm(id) {
       if (form !== session) return;
       form.notes = { status: 'error', key, message: e.message, limit: isAiLimit(e) };
     }
-    renderPanel();
+    form.rerender();
   }
 
   // ----- AI price estimate (rough; only when <3 comparable saved cars) -----
-  let estTimer;
   function scheduleEstimate(car, key) {
-    clearTimeout(estTimer);
+    clearTimeout(form.estTimer);
     form.estimate = { key, status: 'scheduled' };
-    estTimer = setTimeout(() => fetchEstimate(car, key), 900);
+    form.estTimer = setTimeout(() => fetchEstimate(car, key), 900);
   }
 
   async function fetchEstimate(car, key) {
     const session = form;
-    if (form.estimate?.key !== key) return;
+    if (form.estimate?.key !== key || form.estimate.status !== 'scheduled') return;
     form.estimate = { key, status: 'loading' };
-    renderPanel();
+    form.rerender();
     try {
       const res = await api('POST', '/api/price-estimate', {
         id: id || undefined, make: car.make, model: car.model, trim: car.trim, year: car.year,
@@ -867,7 +924,7 @@ async function renderForm(id) {
       if (form !== session || form.estimate?.key !== key) return;
       form.estimate = { key, status: isAiLimit(e) ? 'limit' : 'error', message: e.message };
     }
-    renderPanel();
+    form.rerender();
   }
 
   // ----- seller message: written by the AI, editable; template if the API fails -----
@@ -893,7 +950,7 @@ async function renderForm(id) {
     }
     if (form !== session) return;
     form.seller = { status, text, limit, version: form.seller.version + 1 };
-    renderSeller(buildCar(draft), qc);
+    form.rerender();
   }
 
   // Kept as one element so in-progress taps and typing survive panel re-renders.
@@ -910,10 +967,17 @@ async function renderForm(id) {
     const kids = [h('div.seller-head', {}, h('h3', {}, t('seller.title')), langSeg)];
     if (qc.verdict === 'SKIP') kids.push(h('div.note', {}, t('seller.skipNote')));
     const loading = st.status === 'loading';
+    if (loading) {
+      kids.push(skeleton('load.message'));
+      kids.push(h('div.seller-actions', {},
+        h('button.btn.small', { type: 'button', disabled: true }, t(st.text ? 'seller.rewrite' : 'seller.write'))));
+      sellerBox.replaceChildren(...kids);
+      return;
+    }
     if (!st.text) {
       kids.push(h('div.note', {}, t('seller.intro')));
       kids.push(h('div.seller-actions', {},
-        h('button.btn.small.primary', { type: 'button', onclick: writeMessage, disabled: loading }, t(loading ? 'seller.writing' : 'seller.write'))));
+        h('button.btn.small.primary', { type: 'button', onclick: writeMessage }, t('seller.write'))));
       sellerBox.replaceChildren(...kids);
       return;
     }
@@ -949,12 +1013,15 @@ async function renderForm(id) {
     const body = [
       asHeadline ? h('div.stage-label', {}, t('stage.quick')) : null,
       asHeadline ? h('div.verdict-main', {}, h(`span.verdict-word.${VERDICT_TONE[qc.verdict]}`, {}, qcLabel(qc))) : null,
-      asHeadline ? (reasons ? h('div.qc-reasons', {}, h('bdi', { dir: 'auto' }, reasons)) : h('div.verdict-sub', {}, t('qc.fromAd')))
+      qc.verdict === 'NOT_ENOUGH' ? h('div.verdict-sub', {}, t('qc.notEnough')) : null,
+      asHeadline ? (reasons ? h('div.qc-reasons', {}, h('bdi', { dir: 'auto' }, reasons)) : (qc.verdict === 'NOT_ENOUGH' ? null : h('div.verdict-sub', {}, t('qc.fromAd'))))
         : h('div.qc-reasons', {}, h('bdi', { dir: 'auto' }, qcLine(qc))),
       ...qc.notes.map((n) => h('div.qc-note', {}, t(n.key))),
-      h(`div.cmp${cmpInfo.muted ? '.muted' : ''}`, {},
-        cmpInfo.source ? h('span.cmp-src', {}, t(`cmp.source.${cmpInfo.source}`)) : h('span.cmp-src', {}, t('cmp.title')),
-        ' ', ltrNums(cmpInfo.text)),
+      est && (est.status === 'loading' || est.status === 'scheduled') && num(car.askingPrice) !== null
+        ? skeleton('load.estimate')
+        : h(`div.cmp${cmpInfo.muted ? '.muted' : ''}`, {},
+          cmpInfo.source ? h('span.cmp-src', {}, t(`cmp.source.${cmpInfo.source}`)) : h('span.cmp-src', {}, t('cmp.title')),
+          ' ', ltrNums(cmpInfo.text)),
     ];
     return body;
   }
@@ -995,6 +1062,9 @@ async function renderForm(id) {
     }
     const { qc, comparison, est } = cq;
     renderSeller(car, qc);
+    const mismatches = form.gov?.status === 'done'
+      ? registryMismatches(draft, form.gov.fields, { models, resolved: form.govResolved }) : [];
+    renderMismatches(mismatches);
     const quickStage = r.coverage < QUICK_CHECK_UNTIL;
 
     // Group headers: category points range, e.g. 18–25 / 25.
@@ -1040,9 +1110,11 @@ async function renderForm(id) {
       signs.push(h('div', {}, h('h4.good', {}, t('panel.goodSigns')),
         h('ul.good-list', {}, s.good.map((i) => h('li', {}, t(i.key, fmtVars(i.vars)))))));
     }
-    if (s.watch.length || issueItems.length) {
+    // Registry mismatches come first in "Watch out" (the odometer one is already there as a warning).
+    const watch = [...mismatches.filter((m) => !m.odometer).map((m) => ({ key: `sum.watch.mismatch.${m.key}` })), ...s.watch].slice(0, 3);
+    if (watch.length || issueItems.length) {
       signs.push(h('div', {}, h('h4.watch', {}, t('panel.watchOut')),
-        s.watch.length ? h('ul.watch-list', {}, s.watch.map((i) => h('li', {}, t(i.key, fmtVars(i.vars))))) : null,
+        watch.length ? h('ul.watch-list', {}, watch.map((i) => h('li', {}, t(i.key, fmtVars(i.vars))))) : null,
         issueItems.length ? [h('div.issues-head', {}, t('panel.knownIssuesFrom')),
           h('ul.watch-list', {}, issueItems.map((txt) => h('li', {}, h('bdi', { dir: 'auto' }, txt))))] : null));
     }
@@ -1053,7 +1125,8 @@ async function renderForm(id) {
         !key ? h('div.note', {}, t('panel.knownIssuesNeedModel')) : null,
         notes?.status === 'error' ? h('div.warn-text', {}, notes.limit ? t('ai.limit') : t('panel.knownIssuesError', { msg: notes.message })) : null);
     } else if (notes.status === 'loading') {
-      issuesCtl = h('div.note', {}, t('panel.knownIssuesLoading'));
+      issuesCtl = h('div', {}, skeleton('load.notes'),
+        h('button.btn.small', { type: 'button', disabled: true }, t('panel.knownIssues')));
     } else if (notes.status === 'done' && !notes.items.length) {
       issuesCtl = h('div.note', {}, t('panel.knownIssuesNone'));
     }
@@ -1101,9 +1174,11 @@ async function renderForm(id) {
     });
     const mobileSave = saveButtons.find((b) => b.classList.contains('save-bar')) || saveBtn('.save-bar');
     panel.classList.toggle('expanded', Boolean(form.panelOpen));
-    panel.replaceChildren(
-      h('div.panel-summary', {}, toggle, mobileSave),
-      h('div.panel-body', {}, sections));
+    // Keep the reader's place: on phones the sheet body scrolls, and it's rebuilt here.
+    const prevScroll = panel.querySelector('.panel-body')?.scrollTop || 0;
+    const body = h('div.panel-body', {}, sections);
+    panel.replaceChildren(h('div.panel-summary', {}, toggle, mobileSave), body);
+    if (prevScroll) body.scrollTop = prevScroll;
     fitSegs(sellerBox);
   }
 
@@ -1134,7 +1209,6 @@ async function renderForm(id) {
   // ----- assemble -----
   renderBenchmark();
   renderOwners();
-  renderSuggest();
   const start = h('div.start', {},
     h('button.start-opt.start-upload', { type: 'button', onclick: () => shotInput.click() },
       h('strong', {}, ICON.upload(), t('start.upload')), h('span.muted', {}, t('start.uploadHint'))),
@@ -1151,10 +1225,20 @@ async function renderForm(id) {
     h('div.edit-layout', {},
       h('div.edit-main', {}, shotInput, start, shotStatus, formEl),
       panel));
+  // Async work (AI calls, registry) may finish after the form was rebuilt:
+  // they redraw through these hooks, which always point at the current DOM.
+  form.rerender = () => renderPanel();
+  form.fetchGov = (force) => fetchGov(force);
   renderGov();
   renderShot();
   renderPanel();
+  scheduleGov(); // plate already valid (typed earlier, extracted, or a saved car) → registry lookup
   requestAnimationFrame(() => fitSegs(view));
+  if (form.pulseKeys?.length) {
+    // Screenshot values just arrived: pulse each filled field once.
+    for (const k of form.pulseKeys) formEl.querySelector(`[data-field="${k}"]`)?.classList.add('pulse');
+    form.pulseKeys = null;
+  }
 }
 
 // ---------- settings ----------

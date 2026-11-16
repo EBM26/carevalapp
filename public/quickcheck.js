@@ -12,8 +12,9 @@ export const MIN_COMPARABLES = 3;      // saved cars needed for a "your saved ca
 export const KM_PRICE_ADJUST = 0.15;   // ₪ per km of difference from the comparables' median km
 export const PRICE_BAND = 5;           // % above/below the comparison that counts
 
-export const VERDICT_ORDER = { PURSUE: 0, MAYBE: 1, SKIP: 2 };
-export const VERDICT_TONE = { PURSUE: 'good', MAYBE: 'ok', SKIP: 'bad' };
+export const VERDICT_ORDER = { PURSUE: 0, MAYBE: 1, NOT_ENOUGH: 2, SKIP: 3 };
+export const VERDICT_TONE = { PURSUE: 'good', MAYBE: 'ok', SKIP: 'bad', NOT_ENOUGH: 'neutral' };
+export const MIN_KNOWN = 2; // of: price comparison, km/year, ownership
 
 const norm = (s) => String(s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 
@@ -115,7 +116,7 @@ export function resolveComparison(car, { others = [], estimate = null } = {}) {
  *   comparison  result of resolveComparison (or null)
  *   pending     true while an AI estimate is being fetched (don't flag "no comparison" yet)
  *   asOf        date for car age
- * Returns { verdict, skip, maybe, good, notes, reasons } where each reason is
+ * Returns { verdict, known, knownCount, skip, maybe, good, notes, reasons } where each reason is
  * { key, vars } (i18n keys under qc.skip / qc.maybe / qc.good).
  */
 export function quickCheck(car, { budget = null, comparison = null, pending = false, asOf } = {}) {
@@ -166,6 +167,19 @@ export function quickCheck(car, { budget = null, comparison = null, pending = fa
 
   if (!original) notes.push({ key: 'qc.note.askOwnership' });
 
-  const verdict = skip.length || maybe.length >= 3 ? 'SKIP' : maybe.length ? 'MAYBE' : 'PURSUE';
-  return { verdict, skip, maybe, good, notes, reasons: [...skip, ...maybe, ...good].slice(0, 3) };
+  // How much do we actually know? Without at least 2 of these the verdict
+  // would just reflect missing data, so say so (unless something already
+  // rules the car out).
+  const known = {
+    price: price !== null && Boolean(cmp),
+    kmPerYear: Boolean(kpy) || (km !== null && km > 130000),
+    ownership: Boolean(original),
+  };
+  const knownCount = Object.values(known).filter(Boolean).length;
+
+  let verdict;
+  if (skip.length) verdict = 'SKIP';
+  else if (knownCount < MIN_KNOWN) verdict = 'NOT_ENOUGH';
+  else verdict = maybe.length >= 3 ? 'SKIP' : maybe.length ? 'MAYBE' : 'PURSUE';
+  return { verdict, known, knownCount, skip, maybe, good, notes, reasons: [...skip, ...maybe, ...good].slice(0, 3) };
 }

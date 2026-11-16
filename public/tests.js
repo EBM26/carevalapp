@@ -9,6 +9,8 @@ import { configError, passwordMatches, createSession, verifySession, SESSION_SEC
 import { verdict, knownPoints } from './verdict.js';
 import { summarize } from './summary.js';
 import { formatPlate } from './format.js';
+import { matchModel, sameName, canonicalMake } from './modelmatch.js';
+import { registryMismatches, valueKey } from './govcompare.js';
 import { quickCheck, findComparables, savedComparison, resolveComparison, estimateKey, kmPerYear, KM_PRICE_ADJUST } from './quickcheck.js';
 import { normalizeEstimate, estimatePrompt, ESTIMATE_SCHEMA } from './priceestimate.js';
 import { sellerMissing, sellerTopics, sellerPrompt, normalizeMessage } from './sellermsg.js';
@@ -644,9 +646,34 @@ const QC = (car, opts = {}) => quickCheck(car, { asOf: AS_OF, ...opts });
 const qk = (list) => list.map((i) => i.key.replace(/^qc\.\w+\./, ''));
 const CMP100 = { source: 'saved', value: 100000 };
 
-test('Quick check', 'empty car → Pursue (unknowns never count), with "ask about ownership" note', () => {
+test('Quick check', 'empty car → Not enough info (bug fix: was Pursue), with "ask about ownership" note', () => {
   const q = QC({});
-  eq([q.verdict, q.skip, q.maybe, qk(q.notes)], ['PURSUE', [], [], ['askOwnership']]);
+  eq([q.verdict, q.knownCount, q.skip, q.maybe, qk(q.notes)], ['NOT_ENOUGH', 0, [], [], ['askOwnership']]);
+});
+// Enough info for a real verdict: ownership + km/year known (2 of 3).
+const KNOWN2 = { originalOwnership: 'private', handCount: 1, currentKm: 10000, firstRegistration: '2025-11' };
+test('Not enough info', 'fewer than 2 of (price comparison, km/year, ownership) → Not enough info', () => {
+  eq(QC({ originalOwnership: 'private', handCount: 1 }).verdict, 'NOT_ENOUGH', 'ownership only');
+  eq(QC({ currentKm: 10000, firstRegistration: '2025-11' }).verdict, 'NOT_ENOUGH', 'km/year only');
+  eq(QC({ askingPrice: 95000 }, { comparison: CMP100 }).verdict, 'NOT_ENOUGH', 'price comparison only');
+  eq(QC({ cabinFit: 'easy', year: 2022, make: 'Toyota' }).verdict, 'NOT_ENOUGH', 'other fields don\'t count');
+});
+test('Not enough info', 'exactly 2 known → a real verdict', () => {
+  eq(QC(KNOWN2).verdict, 'PURSUE');
+  eq(QC({ originalOwnership: 'private', handCount: 1, askingPrice: 95000 }, { comparison: CMP100 }).verdict, 'PURSUE');
+  eq(QC({ currentKm: 10000, firstRegistration: '2025-11', askingPrice: 95000 }, { comparison: CMP100 }).knownCount, 2);
+});
+test('Not enough info', 'price without a comparison, or a pending estimate, doesn\'t count as known', () => {
+  eq(QC({ originalOwnership: 'private', askingPrice: 95000 }).verdict, 'NOT_ENOUGH');
+  eq(QC({ originalOwnership: 'private', askingPrice: 95000 }, { pending: true }).verdict, 'NOT_ENOUGH');
+});
+test('Not enough info', 'a definite Skip reason still shows Skip', () => {
+  eq(QC({ cabinFit: 'tight' }).verdict, 'SKIP');
+  eq(QC({ dealBreakers: { lien: 'yes' } }).verdict, 'SKIP');
+  eq(QC({ currentKm: 140000 }).verdict, 'SKIP');
+});
+test('Not enough info', 'has EN/HE strings and sorts between Maybe and Skip', () => {
+  eq([Boolean(STRINGS.en['qc.verdict.NOT_ENOUGH']), Boolean(STRINGS.he['qc.verdict.NOT_ENOUGH'])], [true, true]);
 });
 test('Quick check', 'skip: over budget (strictly above the ceiling)', () => {
   eq(qk(QC({ askingPrice: 120001 }, { budget: 120000, comparison: CMP100 }).skip), ['overBudget']);
@@ -714,11 +741,11 @@ test('Quick check', 'good signs: 1st hand private, low km (<15,000/yr)', () => {
   eq(QC({ currentKm: 15000, firstRegistration: '2025-11' }).good, []);
 });
 test('Quick check', 'verdict: any skip → Skip; 3 maybes → Skip; 1–2 maybes → Maybe; none → Pursue', () => {
-  eq(QC({ cabinFit: 'tight' }).verdict, 'SKIP');
-  eq(QC({ cabinFit: 'adequate' }).verdict, 'MAYBE');
-  eq(QC({ cabinFit: 'adequate', originalOwnership: 'fleet_lease' }).verdict, 'MAYBE');
-  eq(QC({ cabinFit: 'adequate', originalOwnership: 'fleet_lease', askingPrice: 90000 }).verdict, 'SKIP');
-  eq(QC({ cabinFit: 'easy', originalOwnership: 'private', handCount: 1 }).verdict, 'PURSUE');
+  eq(QC({ ...KNOWN2, cabinFit: 'tight' }).verdict, 'SKIP');
+  eq(QC({ ...KNOWN2, cabinFit: 'adequate' }).verdict, 'MAYBE');
+  eq(QC({ ...KNOWN2, cabinFit: 'adequate', originalOwnership: 'fleet_lease' }).verdict, 'MAYBE');
+  eq(QC({ ...KNOWN2, cabinFit: 'adequate', originalOwnership: 'fleet_lease', askingPrice: 90000 }).verdict, 'SKIP');
+  eq(QC({ ...KNOWN2, cabinFit: 'easy' }).verdict, 'PURSUE');
 });
 test('Quick check', 'reasons: max 3, skip first, then maybe, then good', () => {
   const q = QC({ cabinFit: 'tight', originalOwnership: 'fleet_lease', askingPrice: 90000, currentKm: 5000, firstRegistration: '2025-11' });
@@ -806,6 +833,55 @@ test('Seller AI', 'prompt: language, max 6 questions, no scores/app, background 
 test('Seller AI', 'message cleaned; empty → null (template fallback)', () => {
   eq(normalizeMessage({ message: '  היי!\n\n\n\nמה המספר?  ' }), 'היי!\n\nמה המספר?');
   eq([normalizeMessage({ message: '' }), normalizeMessage(null)], [null, null]);
+});
+
+// ---------------- Model list & registry comparison ----------------
+
+const MODELS = [
+  { name: 'Toyota Corolla (sedan)', fit: 'adequate', match: ['corolla', 'קורולה'] },
+  { name: 'Toyota Corolla Cross', fit: 'adequate', match: ['corolla cross', 'קורולה קרוס'] },
+  { name: 'Toyota Corolla Touring Sports', fit: 'easy', match: ['corolla touring', 'corolla ts'] },
+  { name: 'Hyundai i20', fit: 'tight', match: ['i20'] },
+];
+test('Model list', 'longest match wins; Hebrew names work; unknown model → null', () => {
+  eq(matchModel(MODELS, { make: 'Toyota', model: 'Corolla Touring Sports' }).fit, 'easy');
+  eq(matchModel(MODELS, { make: 'טויוטה', model: 'קורולה' }).name, 'Toyota Corolla (sedan)');
+  eq(matchModel(MODELS, { make: 'Toyota', model: 'Corolla', trim: 'TS' }).fit, 'easy');
+  eq([matchModel(MODELS, { make: 'Kia', model: 'Niro' }), matchModel(MODELS, { make: 'Toyota' })], [null, null]);
+});
+test('Model list', 'make/model names across Hebrew and English', () => {
+  eq([canonicalMake('סקודה צ׳כיה'), canonicalMake('Skoda'), canonicalMake('VW')], ['skoda', 'skoda', 'volkswagen']);
+  eq(sameName('Toyota', 'טויוטה', { kind: 'make' }), true);
+  eq(sameName('Kia', 'טויוטה', { kind: 'make' }), false);
+  eq(sameName('קורולה', 'COROLLA', { kind: 'model', models: MODELS }), true);
+  eq(sameName('Corolla', 'COROLLA CROSS', { kind: 'model', models: MODELS }), null, 'abbreviation: can\'t tell');
+  eq(sameName('i20', 'COROLLA', { kind: 'model', models: MODELS }), false);
+  eq(sameName('סאן', 'SUN', { kind: 'trim' }), null, 'different scripts, no table: can\'t tell');
+  eq(sameName('Sun', 'SUN PLUS', { kind: 'trim' }), true);
+});
+
+const GOV = { make: 'טויוטה', model: 'COROLLA', year: 2022, trim: 'SUN', originalOwnership: 'fleet_lease', handCount: 2,
+  testExpiry: '2027-03-14', lastTestKm: 90000 };
+test('Registry', 'matching data → no mismatches; unknown own values are never flagged', () => {
+  eq(registryMismatches({ make: 'Toyota', model: 'Corolla', year: '2022', trim: 'Sun', originalOwnership: 'private_lease', handCount: '2', testExpiry: '2027-03-01', currentKm: 95000 }, GOV, { models: MODELS }), []);
+  eq(registryMismatches({}, GOV), []);
+});
+test('Registry', 'hand count, year, ownership, test month and make mismatches are flagged', () => {
+  const m = registryMismatches({ make: 'Kia', year: 2021, originalOwnership: 'private', handCount: 1, testExpiry: '2027-06-01' }, GOV, { models: MODELS });
+  eq(m.map((x) => [x.key, x.mine, x.gov]), [['make', 'Kia', 'טויוטה'], ['year', 2021, 2022], ['originalOwnership', 'private', 'fleet_lease'], ['handCount', 1, 2], ['testExpiry', '2027-06-01', '2027-03-14']]);
+});
+test('Registry', 'ad km below the last test → odometer mismatch', () => {
+  eq(registryMismatches({ currentKm: 86000 }, GOV), [{ key: 'currentKm', mine: 86000, gov: 90000, odometer: true }]);
+  eq(registryMismatches({ currentKm: 90000 }, GOV), []);
+});
+test('Registry', 'a mismatch the user settled ("keep mine") stays settled until the registry value changes', () => {
+  const car = { handCount: 1 };
+  eq(registryMismatches(car, GOV, { resolved: { handCount: valueKey(2) } }), []);
+  eq(registryMismatches(car, { ...GOV, handCount: 3 }, { resolved: { handCount: valueKey(2) } }).length, 1);
+});
+test('Registry', 'every mismatch has an EN/HE "watch out" line', () => {
+  const keys = ['make', 'model', 'year', 'trim', 'originalOwnership', 'handCount', 'testExpiry'].map((k) => `sum.watch.mismatch.${k}`);
+  eq(keys.filter((k) => !STRINGS.en[k] || !STRINGS.he[k]), []);
 });
 
 // ---------------- runner ----------------

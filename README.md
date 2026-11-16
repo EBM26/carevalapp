@@ -191,12 +191,19 @@ The production database is managed through the D1 console. For a new column:
 3. Add the field to `public/fields.js`.
 4. Locally, delete `.wrangler/state` and run `npm run db:local` again, or run the same `ALTER TABLE` with `npx wrangler d1 execute DB --local -c wrangler.local.toml --command "…"`.
 
+## What happens automatically on the edit screen
+
+- **Cabin fit** is set from `public/models.json` as soon as make and model are known (from a screenshot, typing or the registry), tagged "From model list". If you pick it yourself, your choice is never overwritten. Models that aren't in the table stay Unknown.
+- **Registry lookup** runs 600 ms after the plate becomes valid. It fills empty fields silently, and compares make, model, year, trim, original ownership, hand count and test date with what the ad or you entered. Differences show under the field with buttons to choose, and in "Watch out". Hebrew/English names (e.g. סקודה / Skoda) are matched through the model list and a make table; when the app can't tell, it doesn't flag. Ad km below the last-test km stays a red odometer warning.
+- **Loading states:** screenshots show thumbnails with a shimmer while being read; the price estimate, seller message and known issues each show a skeleton with a short label. With "reduce motion" turned on, these show a static "Working…" instead.
+
 ## Quick check rules
 
 Defined in `public/quickcheck.js`. Unknown fields never count against a car.
 
 - **Skip** (any one): asking price above your budget ceiling (⋯ menu → Settings); rental or driving-school ownership; 3+ hands on a car under 5 years old; over 28,000 km a year or over 130,000 km in total; tight cabin fit; a confirmed deal-breaker.
 - **Maybe:** ex-fleet lease, or 2nd hand ex-lease; 22,001–28,000 km a year; price more than 5% above the comparison; adequate cabin fit; no price comparison available.
+- **Not enough info:** if fewer than 2 of (price comparison, km/year, ownership) are known, the verdict is "Not enough info" (grey), unless a Skip reason already rules the car out.
 - **Verdict:** any Skip reason or 3+ Maybe reasons → Skip; 1–2 → Maybe; none → Pursue.
 - **Price comparison,** first available: a Levi Yitzhak price (or Yad2 range) you entered; the median of 3+ saved cars with the same make and model, year ±1, adjusted by ₪0.15 per km (`KM_PRICE_ADJUST`); a rough AI estimate, fetched on the edit screen and cached per car.
 

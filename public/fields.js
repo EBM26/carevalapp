@@ -3,7 +3,7 @@
 
 import { ENUMS, DEAL_BREAKERS, num } from './scoring.js';
 
-export const SOURCES = ['manual', 'screenshot', 'gov', 'seller'];
+export const SOURCES = ['manual', 'screenshot', 'gov', 'seller', 'model_list'];
 
 // [key, column, type, arg]
 export const FIELDS = [
