@@ -1,0 +1,10 @@
+# LOCAL DEVELOPMENT ONLY. Cloudflare Pages ignores this file: it is not named
+# wrangler.toml, so production bindings and variables are managed in the
+# dashboard (see README). It exists so `npm run db:local` can apply
+# schema.sql to the local D1 database used by `npm run dev`.
+name = "used-car-scorer"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "used-car-scorer-local"
+database_id = "local-dev"
