@@ -120,6 +120,16 @@ details.more[open] { padding-block-end: 4px; }
 .next-steps li { margin-block-end: 4px; }
 .next-steps .note { display: block; }
 
+.seller {
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 12px;
+  margin-block-end: 20px; display: grid; gap: 8px; background: var(--soft);
+}
+.seller-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.seller-head select { width: auto; min-height: 34px; padding-block: 4px; font-size: 15px; }
+.seller textarea { min-height: 0; background: var(--bg); font-size: 15px; resize: none; }
+.seller-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.btn.wa { background: #1f9d55; border-color: #1f9d55; color: #fff; font-weight: 600; }
+
 fieldset { border: 0; padding: 0; margin: 0 0 20px; }
 legend { font-weight: 700; font-size: 15px; margin-block-end: 8px; padding: 0; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }

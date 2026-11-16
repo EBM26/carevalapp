@@ -2,6 +2,7 @@
 import { scoreCar, ENUMS, DEAL_BREAKERS, num } from './scoring.js';
 import { FIELDS, sanitizeCar } from './fields.js';
 import { STRINGS } from './i18n.js';
+import { buildSellerMessage, waLink } from './seller.js';
 
 // ---------- storage (per-device conveniences only; D1 is the source of truth) ----------
 const store = {
@@ -327,13 +328,15 @@ async function renderForm(id) {
       }
       draft = structuredClone(car);
     }
-    form = { id, draft };
+    // Seller message language defaults to Hebrew regardless of the UI language.
+    form = { id, draft, sellerLang: 'he' };
   }
   const draft = form.draft;
 
   // Compact score strip stays pinned while scrolling; the details scroll with the form.
   const panel = h('section.score-panel', { 'aria-live': 'polite' });
   const details = h('section.score-details');
+  const sellerBox = h('section.seller');
   const ownersBox = h('div.grid.full', { style: 'grid-column:1/-1' });
   const suggestBox = h('div.suggest');
 
@@ -376,8 +379,10 @@ async function renderForm(id) {
     ),
   );
 
+  // 'input' fires for every control type (text, select, radio, date). Also
+  // handling 'change' would re-render on blur, which swallowed taps on
+  // buttons in the panel right after typing.
   formEl.addEventListener('input', onEdit);
-  formEl.addEventListener('change', onEdit);
 
   function onEdit(e) {
     const name = e.target.name;
@@ -433,8 +438,42 @@ async function renderForm(id) {
     );
   }
 
+  function renderSeller(car) {
+    const msg = buildSellerMessage(car, form.sellerLang);
+    const key = JSON.stringify([lang, form.sellerLang, msg, car.sellerPhone]);
+    if (sellerBox.dataset.key === key) return; // unchanged: keep DOM (and any in-progress tap) intact
+    sellerBox.dataset.key = key;
+    const langSelect = selectEl('sellerLang', ['he', 'en'].map((l) => [l, t(`langName.${l}`)]), form.sellerLang, (e) => {
+      form.sellerLang = e.target.value;
+      renderSeller(buildCar(draft));
+    });
+    langSelect.setAttribute('aria-label', t('seller.lang'));
+    const head = h('div.seller-head', {}, h('strong', {}, t('seller.title')), langSelect);
+    if (!msg) {
+      sellerBox.replaceChildren(head, h('div.note', {}, t('seller.nothing')));
+      return;
+    }
+    const text = h('textarea', {
+      readonly: true, rows: 4, dir: form.sellerLang === 'he' ? 'rtl' : 'ltr',
+      lang: form.sellerLang, value: msg,
+    });
+    const link = waLink(car.sellerPhone, msg);
+    sellerBox.replaceChildren(
+      head,
+      text,
+      h('div.seller-actions', {},
+        h('button.btn.small', { type: 'button', onclick: () => copyText(msg, text) }, t('seller.copy')),
+        link
+          ? h('a.btn.small.wa', { href: link, target: '_blank', rel: 'noopener' }, t('seller.whatsapp'))
+          : h('span.note', {}, t('seller.noPhone')),
+      ),
+    );
+  }
+
   function renderPanel() {
-    const r = scoreCar(buildCar(draft));
+    const car = buildCar(draft);
+    renderSeller(car);
+    const r = scoreCar(car);
     const next = r.nextSteps.length ? h('div', {},
       h('strong', {}, t('nextSteps')),
       h('ol.next-steps', {}, r.nextSteps.map((s) => h('li', {},
@@ -448,7 +487,8 @@ async function renderForm(id) {
     details.replaceChildren(
       flagsBlock(r, false),
       next,
-      h('details.more', {}, h('summary', {}, t('breakdown')), h('table.breakdown', {}, h('tbody', {}, rows))),
+      h('details.more', { open: form.breakdownOpen, ontoggle: (e) => { form.breakdownOpen = e.target.open; } },
+        h('summary', {}, t('breakdown')), h('table.breakdown', {}, h('tbody', {}, rows))),
     );
   }
 
@@ -475,8 +515,21 @@ async function renderForm(id) {
     h('div.form-head', {}, h('h1', {}, t(id ? 'editCar' : 'newCar')), h('a.btn.ghost', { href: '#/' }, t('back'))),
     panel,
     details,
+    sellerBox,
     formEl,
   );
+}
+
+async function copyText(text, textarea) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(t('seller.copied'));
+  } catch {
+    // Older browsers / non-secure contexts: select the text and use execCommand.
+    textarea.select();
+    const ok = document.execCommand && document.execCommand('copy');
+    toast(t(ok ? 'seller.copied' : 'seller.copyFailed'));
+  }
 }
 
 function dealBreakerControls(draft) {

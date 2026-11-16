@@ -1,6 +1,35 @@
 // i18n.js — every UI string, in English and Hebrew. No UI text lives anywhere else.
 // Placeholders: {name}. Keys with dots are namespaced (e.g. 'rating.OK').
 
+// Seller WhatsApp message. Has its own language option (default Hebrew),
+// independent of the UI language. Hebrew wording follows the spec's template.
+export const SELLER = {
+  he: {
+    opener: 'היי, אשמח לכמה פרטים יבשים לפני שמגיע לראות:',
+    plate: 'מה מספר הרישוי של הרכב?',
+    ownership: 'מה המקוריות של הרכב (פרטי / ליסינג / השכרה)?',
+    trim: 'איזו רמת גימור בדיוק?',
+    regAndTest: 'מתי תאריך עלייה לכביש ועד מתי הטסט?',
+    reg: 'מתי תאריך עלייה לכביש?',
+    test: 'עד מתי הטסט?',
+    serviceAndSlikah: 'יש היסטוריית טיפולים מלאה ודו"ח סליקה נקי מתאונות?',
+    service: 'יש היסטוריית טיפולים מלאה?',
+    slikah: 'יש דו"ח סליקה נקי מתאונות?',
+  },
+  en: {
+    opener: 'Hi, I’d appreciate a few quick details before I come to see it:',
+    plate: 'What’s the plate number?',
+    ownership: 'What was the car’s original ownership (private / lease / rental)?',
+    trim: 'Which trim level exactly?',
+    regAndTest: 'When was it first registered, and when does the test expire?',
+    reg: 'When was it first registered?',
+    test: 'When does the test expire?',
+    serviceAndSlikah: 'Is there a full service history and a clean Slikah (claims) report with no accidents?',
+    service: 'Is there a full service history?',
+    slikah: 'Is there a clean Slikah (claims) report with no accidents?',
+  },
+};
+
 export const STRINGS = {
   en: {
     appTitle: 'Car Scorer',
@@ -146,6 +175,17 @@ export const STRINGS = {
     'note.price_confidence_low': 'Price confidence LOW (Yad2 comparables)',
     'note.km_from_last_test': 'Using km at last test (current km unknown)',
     'note.ownership_review': 'Unusual ownership combination: review',
+
+    'seller.title': 'Message to seller',
+    'seller.lang': 'Message language',
+    'seller.copy': 'Copy',
+    'seller.copied': 'Copied',
+    'seller.copyFailed': 'Couldn’t copy. Select the text and copy it manually.',
+    'seller.whatsapp': 'Open in WhatsApp',
+    'seller.nothing': 'Nothing left to ask the seller.',
+    'seller.noPhone': 'Add the seller’s phone number to open WhatsApp directly.',
+    'langName.he': 'עברית',
+    'langName.en': 'English',
   },
 
   he: {
@@ -292,5 +332,16 @@ export const STRINGS = {
     'note.price_confidence_low': 'ביטחון נמוך במחיר (השוואות ביד2)',
     'note.km_from_last_test': 'מחושב לפי הק״מ בטסט האחרון (ק״מ נוכחי לא ידוע)',
     'note.ownership_review': 'שילוב בעלויות חריג: כדאי לבדוק',
+
+    'seller.title': 'הודעה למוכר',
+    'seller.lang': 'שפת ההודעה',
+    'seller.copy': 'העתקה',
+    'seller.copied': 'הועתק',
+    'seller.copyFailed': 'ההעתקה נכשלה. סמנו את הטקסט והעתיקו ידנית.',
+    'seller.whatsapp': 'פתיחה בוואטסאפ',
+    'seller.nothing': 'אין עוד מה לשאול את המוכר.',
+    'seller.noPhone': 'הוסיפו את מספר הטלפון של המוכר כדי לפתוח ישירות בוואטסאפ.',
+    'langName.he': 'עברית',
+    'langName.en': 'English',
   },
 };

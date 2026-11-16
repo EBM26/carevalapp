@@ -4,7 +4,8 @@
 
 import { scoreCar, band, num, ENUMS, DEAL_BREAKERS, WEIGHTS } from './scoring.js';
 import { FIELDS, sanitizeCar } from './fields.js';
-import { STRINGS } from './i18n.js';
+import { STRINGS, SELLER } from './i18n.js';
+import { buildSellerMessage, waNumber, waLink } from './seller.js';
 
 const AS_OF = '2026-11-16';
 const S = (car) => scoreCar(car, { asOf: AS_OF });
@@ -302,6 +303,46 @@ test('Fields', 'sanitizeCar cleans bad input to null and defaults', () => {
   eq(c.dealBreakers, { structuralDamage: 'unknown', totalLoss: 'unknown', lien: 'yes', sellerRefuses: 'unknown' });
   eq(c.fieldSources, { currentKm: 'gov' });
 });
+
+// ---------------- Seller message ----------------
+
+const TEMPLATE = 'היי, אשמח לכמה פרטים יבשים לפני שמגיע לראות: מה המקוריות של הרכב (פרטי / ליסינג / השכרה)? איזו רמת גימור בדיוק? מתי תאריך עלייה לכביש ועד מתי הטסט? יש היסטוריית טיפולים מלאה ודו"ח סליקה נקי מתאונות?';
+
+test('Seller', 'plate known, all template fields missing → exactly the spec template', () =>
+  eq(buildSellerMessage({ plate: '1234567' }), TEMPLATE));
+test('Seller', 'plate missing → plate question added right after the opener', () => {
+  const m = buildSellerMessage({});
+  eq(m.startsWith(`${SELLER.he.opener} ${SELLER.he.plate} ${SELLER.he.ownership}`), true);
+});
+test('Seller', 'everything known → null (nothing to ask)', () =>
+  eq(buildSellerMessage({
+    plate: '1234567', originalOwnership: 'private', trim: 'Sun', firstRegistration: '2022-01',
+    testExpiry: '2027-01-01', serviceHistory: 'full', insuranceClaims: 'none',
+  }), null));
+test('Seller', 'only test missing → asks only "until when is the test"', () =>
+  eq(buildSellerMessage({
+    plate: '1234567', originalOwnership: 'private', trim: 'Sun', firstRegistration: '2022-01',
+    serviceHistory: 'full', insuranceClaims: 'none',
+  }), `${SELLER.he.opener} ${SELLER.he.test}`));
+test('Seller', 'only Slikah missing → asks only for the Slikah report', () =>
+  eq(buildSellerMessage({
+    plate: '1234567', originalOwnership: 'private', trim: 'Sun', firstRegistration: '2022-01',
+    testExpiry: '2027-01-01', serviceHistory: 'full',
+  }), `${SELLER.he.opener} ${SELLER.he.slikah}`));
+test('Seller', 'model year alone does not count as known registration date', () =>
+  eq(buildSellerMessage({ plate: '1', year: 2022, originalOwnership: 'private', trim: 'x', testExpiry: '2027-01-01', serviceHistory: 'full', insuranceClaims: 'none' }),
+    `${SELLER.he.opener} ${SELLER.he.reg}`));
+test('Seller', 'English option uses the English wording', () =>
+  eq(buildSellerMessage({ plate: '1234567', trim: 'x', originalOwnership: 'private', firstRegistration: '2022-01', testExpiry: '2027-01-01' }, 'en'),
+    `${SELLER.en.opener} ${SELLER.en.serviceAndSlikah}`));
+test('Seller', 'he and en message tables have the same keys', () =>
+  eq(Object.keys(SELLER.he).sort(), Object.keys(SELLER.en).sort()));
+test('Seller', 'wa.me number from Israeli formats', () =>
+  eq(['050-123-4567', '+972 50 123 4567', '00972501234567', '972501234567', '123', ''].map(waNumber),
+    ['972501234567', '972501234567', '972501234567', '972501234567', null, null]));
+test('Seller', 'wa.me link has the message URL-encoded', () =>
+  eq(waLink('050-1234567', 'היי? a&b'), `https://wa.me/972501234567?text=${encodeURIComponent('היי? a&b')}`));
+test('Seller', 'no phone → no link', () => eq(waLink(null, 'x'), null));
 
 // ---------------- runner ----------------
 
