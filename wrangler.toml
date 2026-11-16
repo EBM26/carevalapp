@@ -1,0 +1,11 @@
+name = "used-car-scorer"
+compatibility_date = "2026-11-01"
+pages_build_output_dir = "public"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "used-car-scorer"
+# Local dev works with this placeholder. Replace with the real ID from
+# `wrangler d1 create used-car-scorer` before deploying (see README).
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"

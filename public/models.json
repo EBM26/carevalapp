@@ -1,0 +1,89 @@
+{
+  "_about": "Cabin fit for two car seats + a full-size UPPAbaby stroller. Rough seed values from boot size and rear-seat width; edit freely. 'match' strings are compared case-insensitively against make + model + trim, ignoring spaces and punctuation. The longest matching string wins, so 'corolla cross' beats 'corolla'.",
+  "models": [
+    { "name": "Toyota Corolla (sedan)", "fit": "adequate", "match": ["corolla", "קורולה"] },
+    { "name": "Toyota Corolla Touring Sports", "fit": "easy", "match": ["corolla touring", "corolla ts", "corolla sw", "corolla wagon", "קורולה סטיישן", "קורולה טורינג"] },
+    { "name": "Toyota Corolla Cross", "fit": "adequate", "match": ["corolla cross", "קורולה קרוס"] },
+    { "name": "Toyota Corolla Hatchback", "fit": "tight", "match": ["corolla hatchback", "corolla hb", "קורולה האצ'בק"] },
+    { "name": "Toyota Yaris", "fit": "tight", "match": ["yaris", "יאריס"] },
+    { "name": "Toyota Yaris Cross", "fit": "tight", "match": ["yaris cross", "יאריס קרוס"] },
+    { "name": "Toyota C-HR", "fit": "tight", "match": ["c-hr", "chr", "סי אייץ' אר"] },
+    { "name": "Toyota RAV4", "fit": "easy", "match": ["rav4", "rav 4", "ראב 4", "ראב4"] },
+
+    { "name": "Skoda Octavia", "fit": "easy", "match": ["octavia", "אוקטביה"] },
+    { "name": "Skoda Fabia", "fit": "tight", "match": ["fabia", "פאביה"] },
+    { "name": "Skoda Scala", "fit": "adequate", "match": ["scala", "סקאלה"] },
+    { "name": "Skoda Kamiq", "fit": "adequate", "match": ["kamiq", "קאמיק"] },
+    { "name": "Skoda Karoq", "fit": "easy", "match": ["karoq", "קארוק"] },
+    { "name": "Skoda Kodiaq", "fit": "easy", "match": ["kodiaq", "קודיאק"] },
+
+    { "name": "Hyundai Elantra", "fit": "adequate", "match": ["elantra", "אלנטרה"] },
+    { "name": "Hyundai i10", "fit": "tight", "match": ["i10", "איי 10"] },
+    { "name": "Hyundai i20", "fit": "tight", "match": ["i20", "איי 20"] },
+    { "name": "Hyundai i30", "fit": "adequate", "match": ["i30", "איי 30"] },
+    { "name": "Hyundai i30 Wagon", "fit": "easy", "match": ["i30 wagon", "i30 sw", "i30 סטיישן", "איי 30 סטיישן"] },
+    { "name": "Hyundai Bayon", "fit": "adequate", "match": ["bayon", "באיון"] },
+    { "name": "Hyundai Kona", "fit": "tight", "match": ["kona", "קונה"] },
+    { "name": "Hyundai Tucson", "fit": "easy", "match": ["tucson", "טוסון"] },
+    { "name": "Hyundai Ioniq 5", "fit": "easy", "match": ["ioniq 5", "איוניק 5"] },
+
+    { "name": "Kia Picanto", "fit": "tight", "match": ["picanto", "פיקנטו"] },
+    { "name": "Kia Rio", "fit": "tight", "match": ["kia rio", "rio", "ריו"] },
+    { "name": "Kia Stonic", "fit": "tight", "match": ["stonic", "סטוניק"] },
+    { "name": "Kia Ceed", "fit": "adequate", "match": ["ceed", "סיד"] },
+    { "name": "Kia Ceed SW", "fit": "easy", "match": ["ceed sw", "ceed wagon", "סיד סטיישן"] },
+    { "name": "Kia XCeed", "fit": "adequate", "match": ["xceed", "אקססיד"] },
+    { "name": "Kia Niro", "fit": "adequate", "match": ["niro", "נירו"] },
+    { "name": "Kia Seltos", "fit": "adequate", "match": ["seltos", "סלטוס"] },
+    { "name": "Kia Sportage", "fit": "easy", "match": ["sportage", "ספורטאז'", "ספורטז'"] },
+    { "name": "Kia Sorento", "fit": "easy", "match": ["sorento", "סורנטו"] },
+
+    { "name": "Honda Civic", "fit": "adequate", "match": ["civic", "סיוויק"] },
+    { "name": "Honda Jazz", "fit": "tight", "match": ["jazz", "ג'אז"] },
+    { "name": "Honda HR-V", "fit": "adequate", "match": ["hr-v", "hrv"] },
+    { "name": "Honda CR-V", "fit": "easy", "match": ["cr-v", "crv"] },
+
+    { "name": "Mazda 2", "fit": "tight", "match": ["mazda 2", "מאזדה 2"] },
+    { "name": "Mazda 3 (hatchback)", "fit": "tight", "match": ["mazda 3", "מאזדה 3"] },
+    { "name": "Mazda 3 sedan", "fit": "adequate", "match": ["mazda 3 sedan", "מאזדה 3 סדאן"] },
+    { "name": "Mazda CX-30", "fit": "adequate", "match": ["cx-30", "cx30"] },
+    { "name": "Mazda CX-5", "fit": "easy", "match": ["cx-5", "cx5"] },
+
+    { "name": "Suzuki Swift", "fit": "tight", "match": ["swift", "סוויפט"] },
+    { "name": "Suzuki Baleno", "fit": "tight", "match": ["baleno", "בלנו"] },
+    { "name": "Suzuki Vitara", "fit": "adequate", "match": ["vitara", "ויטרה"] },
+    { "name": "Suzuki S-Cross", "fit": "adequate", "match": ["s-cross", "sx4", "אס קרוס"] },
+
+    { "name": "Mitsubishi Space Star", "fit": "tight", "match": ["space star", "ספייס סטאר"] },
+    { "name": "Mitsubishi ASX", "fit": "adequate", "match": ["asx"] },
+    { "name": "Mitsubishi Eclipse Cross", "fit": "adequate", "match": ["eclipse cross", "אקליפס קרוס"] },
+    { "name": "Mitsubishi Outlander", "fit": "easy", "match": ["outlander", "אאוטלנדר"] },
+
+    { "name": "Seat Ibiza", "fit": "tight", "match": ["ibiza", "איביזה"] },
+    { "name": "Seat Leon", "fit": "adequate", "match": ["leon", "לאון"] },
+    { "name": "Seat Arona", "fit": "adequate", "match": ["arona", "ארונה"] },
+    { "name": "Seat Ateca", "fit": "easy", "match": ["ateca", "אטקה"] },
+
+    { "name": "VW Polo", "fit": "tight", "match": ["polo", "פולו"] },
+    { "name": "VW Golf", "fit": "adequate", "match": ["golf", "גולף"] },
+    { "name": "VW T-Roc", "fit": "adequate", "match": ["t-roc", "troc", "טי רוק"] },
+    { "name": "VW Tiguan", "fit": "easy", "match": ["tiguan", "טיגואן"] },
+
+    { "name": "Peugeot 208", "fit": "tight", "match": ["peugeot 208", "פיג'ו 208"] },
+    { "name": "Peugeot 2008", "fit": "adequate", "match": ["peugeot 2008", "פיג'ו 2008"] },
+    { "name": "Peugeot 308", "fit": "adequate", "match": ["peugeot 308", "פיג'ו 308"] },
+    { "name": "Peugeot 3008", "fit": "easy", "match": ["peugeot 3008", "פיג'ו 3008"] },
+
+    { "name": "Renault Clio", "fit": "tight", "match": ["clio", "קליאו"] },
+    { "name": "Renault Captur", "fit": "adequate", "match": ["captur", "קפצ'ור"] },
+    { "name": "Nissan Qashqai", "fit": "adequate", "match": ["qashqai", "קשקאי"] },
+    { "name": "Chevrolet Spark", "fit": "tight", "match": ["spark", "ספארק"] },
+
+    { "name": "Tesla Model 3", "fit": "adequate", "match": ["model 3", "מודל 3"] },
+    { "name": "Tesla Model Y", "fit": "easy", "match": ["model y", "מודל y"] },
+    { "name": "BYD Atto 3", "fit": "adequate", "match": ["atto 3", "אטו 3"] },
+    { "name": "MG ZS", "fit": "adequate", "match": ["mg zs", "zs ev"] },
+    { "name": "MG4", "fit": "adequate", "match": ["mg4", "mg 4"] },
+    { "name": "Chery Tiggo 7 Pro", "fit": "adequate", "match": ["tiggo 7", "טיגו 7"] }
+  ]
+}
