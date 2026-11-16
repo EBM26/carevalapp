@@ -163,7 +163,7 @@ main { max-width: 1240px; margin-inline: auto; padding: 20px 16px 48px; }
 .rows { border-block-start: 1px solid var(--line); }
 .row-head, .row {
   display: grid; align-items: center; column-gap: 16px;
-  grid-template-columns: 124px minmax(0, 1.5fr) 92px 104px minmax(120px, 1fr) 112px 52px 104px 16px;
+  grid-template-columns: 124px minmax(0, 1.5fr) 92px 104px minmax(110px, 1fr) 148px 52px 96px 16px;
 }
 .row-head { padding: 8px 12px; font-size: var(--fs-1); color: var(--steel); border-block-end: 1px solid var(--line); }
 .row-head .end, .row .price, .row .km, .row .cov { text-align: end; }
@@ -181,7 +181,8 @@ main { max-width: 1240px; margin-inline: auto; padding: 20px 16px 48px; }
 .row .price { grid-column: 3; }
 .row .km { grid-column: 4; }
 .row .bar { grid-column: 5; }
-.row .badge { grid-column: 6; justify-self: start; }
+.row .verdict-cell { grid-column: 6; display: flex; align-items: center; gap: 6px; }
+.verdict-cell .stage, .panel-toggle .stage { font-size: 12px; color: var(--steel); white-space: nowrap; }
 .row .cov { grid-column: 7; color: var(--steel); }
 .row .status { grid-column: 8; color: var(--steel); font-size: var(--fs-1); }
 .row .flag, .row .flag-slot { grid-column: 9; }
@@ -341,6 +342,16 @@ input::-webkit-date-and-time-value { text-align: start; }
 .verdict-word.neutral { color: var(--ink); }
 .verdict-up { font-size: var(--fs-2); color: var(--steel); }
 .verdict-sub { font-size: var(--fs-1); color: var(--steel); }
+.verdict-word.secondary { font-size: var(--fs-3); }
+.stage-label { font-size: var(--fs-1); color: var(--steel); font-weight: 500; }
+.qc-reasons { font-size: var(--fs-2); line-height: 1.4; }
+.qc-note { font-size: var(--fs-1); color: var(--ok); }
+.cmp { font-size: var(--fs-1); color: var(--ink); line-height: 1.45; }
+.cmp.muted { color: var(--steel); }
+.cmp-src { font-weight: 600; }
+.cmp-src::after { content: ":"; }
+.settings-wrap { max-width: 420px; }
+.settings { display: grid; gap: 16px; }
 
 .signs { display: grid; gap: 12px; }
 .signs h4 { margin: 0 0 4px; font-size: var(--fs-1); font-weight: 600; }

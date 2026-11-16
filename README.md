@@ -1,6 +1,12 @@
 # Used Car Scorer
 
-A small personal web app for scoring used cars from Israeli listings (Yad2, Facebook, dealers) against a 100-point rubric. Data is entered by hand, read from ad screenshots by an LLM, or fetched from data.gov.il by plate number. Unknown data gives a score **range** rather than a guess.
+A small personal web app for checking used cars from Israeli listings (Yad2, Facebook, dealers) in three stages:
+
+1. **Quick check** from the ad alone: Pursue / Maybe / Skip.
+2. **Seller message:** a short WhatsApp message, written by the AI, asking for what's missing.
+3. **Full score** against a 100-point rubric, once the seller has replied (it becomes the headline at 50% coverage).
+
+ Data is entered by hand, read from ad screenshots by an LLM, or fetched from data.gov.il by plate number. Unknown data gives a score **range** rather than a guess.
 
 Stack: Cloudflare Pages (static `public/`), Pages Functions (`functions/`), D1. No frameworks, no build step. The whole site is password-protected by `functions/_middleware.js`.
 
@@ -11,6 +17,9 @@ Stack: Cloudflare Pages (static `public/`), Pages Functions (`functions/`), D1. 
 | Path | What it is |
 |---|---|
 | `public/scoring.js` | The rubric. Pure functions, shared by the browser and Functions |
+| `public/quickcheck.js` | Stage 1 rules (Skip / Maybe / good signs) and the price comparison (saved cars, AI estimate) |
+| `public/sellermsg.js` | Stage 2: what to ask the seller and the prompt for the AI message |
+| `public/priceestimate.js` | Prompt and schema for the rough AI price estimate |
 | `public/verdict.js` | What the UI shows for a score: Avoid / Too early to tell / OK / Strong buy |
 | `public/summary.js` | Rules for the "Good signs" / "Watch out" lists |
 | `public/modelnotes.js` | Prompt and schema for "Known issues for this model" |
@@ -29,6 +38,9 @@ Stack: Cloudflare Pages (static `public/`), Pages Functions (`functions/`), D1. 
 | `functions/api/cars/` | `GET/POST /api/cars`, `PUT/DELETE /api/cars/:id` |
 | `functions/api/gov.js` | `GET /api/gov?plate=…` (server-side data.gov.il lookup) |
 | `functions/api/extract.js` | `POST /api/extract` (screenshots → fields) |
+| `functions/api/settings.js` | `GET/PUT /api/settings` (budget ceiling) |
+| `functions/api/price-estimate.js` | `POST /api/price-estimate` (rough AI price range, cached per car) |
+| `functions/api/seller-message.js` | `POST /api/seller-message` (AI-written WhatsApp message; the app falls back to a template) |
 | `functions/api/model-notes.js` | `POST /api/model-notes` (known issues for a make/model/year, cached per car) |
 | `functions/_lib/llm.js` | Shared Gemini/Anthropic call used by both LLM endpoints |
 | `schema.sql` | Full D1 schema for a new database. Safe to re-run: every statement uses `IF NOT EXISTS` |
@@ -162,10 +174,11 @@ Existing databases need each file in `migrations/` applied once, in order. New d
 | File | What it does | SQL to paste in the D1 console |
 |---|---|---|
 | `0002_model_notes.sql` | Adds the cache column for "Known issues for this model" | `ALTER TABLE cars ADD COLUMN model_notes TEXT;` |
+| `0003_quick_check.sql` | Adds the `settings` table (budget ceiling) and the cache column for the AI price estimate | `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT NOT NULL);` then `ALTER TABLE cars ADD COLUMN price_estimate TEXT;` |
 
-If the console answers `duplicate column name`, the migration is already applied. Until it's applied, "Known issues" still works but isn't cached, so it calls the LLM every time.
+If the console answers `duplicate column name`, the migration is already applied. Until a migration is applied the app still works: "Known issues" and the AI price estimate just aren't cached, and the budget ceiling can't be saved.
 
-Locally: `npx wrangler d1 execute DB --local -c wrangler.local.toml --file=migrations/0002_model_notes.sql`.
+Locally, for each file: `npx wrangler d1 execute DB --local -c wrangler.local.toml --file=migrations/0002_model_notes.sql` (and `0003_quick_check.sql`).
 
 ## Changing the schema later
 
@@ -174,6 +187,15 @@ The production database is managed through the D1 console. For a new column:
 2. Run an `ALTER TABLE cars ADD COLUMN …;` in the D1 console for the existing database.
 3. Add the field to `public/fields.js`.
 4. Locally, delete `.wrangler/state` and run `npm run db:local` again, or run the same `ALTER TABLE` with `npx wrangler d1 execute DB --local -c wrangler.local.toml --command "…"`.
+
+## Quick check rules
+
+Defined in `public/quickcheck.js`. Unknown fields never count against a car.
+
+- **Skip** (any one): asking price above your budget ceiling (⋯ menu → Settings); rental or driving-school ownership; 3+ hands on a car under 5 years old; over 28,000 km a year or over 130,000 km in total; tight cabin fit; a confirmed deal-breaker.
+- **Maybe:** ex-fleet lease, or 2nd hand ex-lease; 22,001–28,000 km a year; price more than 5% above the comparison; adequate cabin fit; no price comparison available.
+- **Verdict:** any Skip reason or 3+ Maybe reasons → Skip; 1–2 → Maybe; none → Pursue.
+- **Price comparison,** first available: a Levi Yitzhak price (or Yad2 range) you entered; the median of 3+ saved cars with the same make and model, year ±1, adjusted by ₪0.15 per km (`KM_PRICE_ADJUST`); a rough AI estimate, fetched on the edit screen and cached per car.
 
 ## Notes on the data
 

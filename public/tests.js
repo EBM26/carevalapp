@@ -9,6 +9,9 @@ import { configError, passwordMatches, createSession, verifySession, SESSION_SEC
 import { verdict, knownPoints } from './verdict.js';
 import { summarize } from './summary.js';
 import { formatPlate } from './format.js';
+import { quickCheck, findComparables, savedComparison, resolveComparison, estimateKey, kmPerYear, KM_PRICE_ADJUST } from './quickcheck.js';
+import { normalizeEstimate, estimatePrompt, ESTIMATE_SCHEMA } from './priceestimate.js';
+import { sellerMissing, sellerTopics, sellerPrompt, normalizeMessage } from './sellermsg.js';
 import { modelKey, normalizeNotes, NOTES_SCHEMA, buildGeminiNotesRequest, buildAnthropicNotesRequest, notesPrompt } from './modelnotes.js';
 import { buildSellerMessage, waNumber, waLink } from './seller.js';
 import { mapGov, mergeGov, mergeFields, stripCountry, normYm } from './govmap.js';
@@ -632,6 +635,177 @@ test('Model notes', 'requests use the schema (max 3 items) and name the car', ()
   eq([p.includes('2020 Kia Niro'), NOTES_SCHEMA.properties.items.maxItems], [true, 3]);
   eq(buildGeminiNotesRequest(p).generationConfig.responseJsonSchema === NOTES_SCHEMA, true);
   eq(buildAnthropicNotesRequest(p, 'm').tool_choice, { type: 'tool', name: 'record_issues' });
+});
+
+// ---------------- Quick check ----------------
+// asOf Nov 2026. firstRegistration 2025-11 → 12 months old, so km = km/year.
+
+const QC = (car, opts = {}) => quickCheck(car, { asOf: AS_OF, ...opts });
+const qk = (list) => list.map((i) => i.key.replace(/^qc\.\w+\./, ''));
+const CMP100 = { source: 'saved', value: 100000 };
+
+test('Quick check', 'empty car → Pursue (unknowns never count), with "ask about ownership" note', () => {
+  const q = QC({});
+  eq([q.verdict, q.skip, q.maybe, qk(q.notes)], ['PURSUE', [], [], ['askOwnership']]);
+});
+test('Quick check', 'skip: over budget (strictly above the ceiling)', () => {
+  eq(qk(QC({ askingPrice: 120001 }, { budget: 120000, comparison: CMP100 }).skip), ['overBudget']);
+  eq(QC({ askingPrice: 120000 }, { budget: 120000, comparison: { source: 'saved', value: 120000 } }).skip, []);
+  eq(QC({ askingPrice: 999999 }, { budget: null, comparison: CMP100 }).skip.length, 0);
+});
+test('Quick check', 'skip: original rental or driving school (also later in history)', () => {
+  eq(qk(QC({ originalOwnership: 'rental' }).skip), ['rental']);
+  eq(qk(QC({ originalOwnership: 'driving_school' }).skip), ['rental']);
+  eq(qk(QC({ originalOwnership: 'private', handCount: 2, ownershipHistory: [{ type: 'private' }, { type: 'rental' }] }).skip), ['rental']);
+});
+test('Quick check', 'skip: 3+ hands at age 4.9 yrs, but not at 5.1 yrs', () => {
+  // 2022-01 → 58 months (4.8–4.9 yrs); 2021-10 → 61 months (5.1 yrs)
+  eq(qk(QC({ handCount: 3, firstRegistration: '2022-01' }).skip), ['manyHandsYoung']);
+  eq(QC({ handCount: 3, firstRegistration: '2021-10' }).skip, []);
+  eq(QC({ handCount: 2, firstRegistration: '2024-01' }).skip, []);
+  eq(QC({ handCount: 4 }).skip, [], 'age unknown → not counted');
+});
+test('Quick check', 'km/year boundaries: 28,000 maybe, 28,001 skip; 22,000 nothing, 22,001 maybe', () => {
+  const kmq = (km) => QC({ currentKm: km, firstRegistration: '2025-11' });
+  eq([qk(kmq(28000).maybe), kmq(28000).skip], [['kmYear'], []]);
+  eq(qk(kmq(28001).skip), ['highKmYear']);
+  eq([kmq(22000).maybe, kmq(22000).skip], [[], []]);
+  eq(qk(kmq(22001).maybe), ['kmYear']);
+});
+test('Quick check', 'total km: 130,000 ok, 130,001 skip (even at low km/year)', () => {
+  eq(QC({ currentKm: 130000, firstRegistration: '2016-11' }).skip, []);
+  eq(qk(QC({ currentKm: 130001, firstRegistration: '2016-11' }).skip), ['highTotalKm']);
+});
+test('Quick check', 'model year only: km/year uses the best case for skip/maybe', () => {
+  // 2024, 30,000 km → 10,588–15,652 km/yr: no maybe, and not "low km" (worst case ≥ 15,000)
+  eq(kmPerYear({ year: 2024, currentKm: 30000 }, AS_OF), { low: 10588, high: 15652 });
+  const q = QC({ year: 2024, currentKm: 30000 });
+  eq([q.maybe, q.good], [[], []]);
+});
+test('Quick check', 'cabin: tight skip, adequate maybe, easy good sign', () => {
+  eq(qk(QC({ cabinFit: 'tight' }).skip), ['cabinTight']);
+  eq(qk(QC({ cabinFit: 'adequate' }).maybe), ['cabinAdequate']);
+  eq(qk(QC({ cabinFit: 'easy' }).good), ['cabinEasy']);
+});
+test('Quick check', 'confirmed deal-breaker → skip; unknown deal-breakers don\'t count', () => {
+  eq(qk(QC({ dealBreakers: { lien: 'yes' } }).skip), ['dealBreaker']);
+  eq(QC({ dealBreakers: { lien: 'unknown', totalLoss: 'no' } }).skip, []);
+});
+test('Quick check', 'maybe: fleet lease, or 2nd hand ex-lease; 1st hand private lease is neither', () => {
+  eq(qk(QC({ originalOwnership: 'fleet_lease', handCount: 1 }).maybe), ['fleet']);
+  eq(qk(QC({ originalOwnership: 'private_lease', handCount: 2 }).maybe), ['exLease2nd']);
+  eq(QC({ originalOwnership: 'private_lease', handCount: 1 }).maybe, []);
+});
+test('Quick check', 'price vs comparison: the 5% threshold both ways', () => {
+  const p = (price) => QC({ askingPrice: price }, { comparison: CMP100 });
+  eq(p(105000).maybe, [], 'exactly +5% is fine');
+  eq(qk(p(105001).maybe), ['high.saved']);
+  eq(p(95001).good, [], 'just under −5% is not a good sign');
+  eq(qk(p(95000).good), ['low.saved']);
+});
+test('Quick check', 'no comparison → maybe; but not while an estimate is pending, and not without a price', () => {
+  eq(qk(QC({ askingPrice: 90000 }).maybe), ['noComparison']);
+  eq(QC({ askingPrice: 90000 }, { pending: true }).maybe, []);
+  eq(QC({}).maybe, []);
+});
+test('Quick check', 'good signs: 1st hand private, low km (<15,000/yr)', () => {
+  const q = QC({ originalOwnership: 'private', handCount: 1, currentKm: 14999, firstRegistration: '2025-11' });
+  eq(qk(q.good), ['firstHandPrivate', 'lowKm']);
+  eq(QC({ currentKm: 15000, firstRegistration: '2025-11' }).good, []);
+});
+test('Quick check', 'verdict: any skip → Skip; 3 maybes → Skip; 1–2 maybes → Maybe; none → Pursue', () => {
+  eq(QC({ cabinFit: 'tight' }).verdict, 'SKIP');
+  eq(QC({ cabinFit: 'adequate' }).verdict, 'MAYBE');
+  eq(QC({ cabinFit: 'adequate', originalOwnership: 'fleet_lease' }).verdict, 'MAYBE');
+  eq(QC({ cabinFit: 'adequate', originalOwnership: 'fleet_lease', askingPrice: 90000 }).verdict, 'SKIP');
+  eq(QC({ cabinFit: 'easy', originalOwnership: 'private', handCount: 1 }).verdict, 'PURSUE');
+});
+test('Quick check', 'reasons: max 3, skip first, then maybe, then good', () => {
+  const q = QC({ cabinFit: 'tight', originalOwnership: 'fleet_lease', askingPrice: 90000, currentKm: 5000, firstRegistration: '2025-11' });
+  eq(q.reasons.map((r) => r.key), ['qc.skip.cabinTight', 'qc.maybe.fleet', 'qc.maybe.noComparison']);
+  const g = QC({ originalOwnership: 'private', handCount: 1, cabinFit: 'easy', currentKm: 5000, firstRegistration: '2025-11', askingPrice: 80000 }, { comparison: CMP100 });
+  eq(g.reasons.map((r) => r.key), ['qc.price.low.saved', 'qc.good.firstHandPrivate', 'qc.good.lowKm']);
+});
+
+test('Quick check', 'every reason, note and source the quick check can produce has EN and HE text', () => {
+  const keys = ['overBudget', 'rental', 'manyHandsYoung', 'highKmYear', 'highTotalKm', 'cabinTight', 'dealBreaker'].map((k) => `qc.skip.${k}`)
+    .concat(['fleet', 'exLease2nd', 'kmYear', 'cabinAdequate', 'noComparison'].map((k) => `qc.maybe.${k}`))
+    .concat(['firstHandPrivate', 'lowKm', 'cabinEasy'].map((k) => `qc.good.${k}`), ['qc.note.askOwnership'])
+    .concat(['saved', 'ai', 'levi', 'yad2'].flatMap((s) => [`qc.price.high.${s}`, `qc.price.low.${s}`, `cmp.source.${s}`]))
+    .concat(['PURSUE', 'MAYBE', 'SKIP'].map((v) => `qc.verdict.${v}`), ['sort.quick', 'stage.quick', 'stage.full']);
+  eq(keys.filter((k) => !STRINGS.en[k] || !STRINGS.he[k]), []);
+});
+
+// ---------------- Price comparison ----------------
+
+const corolla = (id, year, price, km) => ({ id, make: 'Toyota', model: 'Corolla', year, askingPrice: price, currentKm: km });
+const SAVED = [
+  corolla('a', 2021, 90000, 80000), corolla('b', 2022, 100000, 60000), corolla('c', 2023, 110000, 40000),
+  corolla('d', 2024, 150000, 10000),          // year +2: out
+  { id: 'e', make: 'toyota', model: 'COROLLA', year: 2022, askingPrice: 96000, currentKm: 70000 },   // case-insensitive: in
+  corolla('f', 2022, null, 50000),            // no price: out
+  { id: 'g', make: 'Toyota', model: 'Yaris', year: 2022, askingPrice: 70000 }, // other model: out
+];
+const ME = corolla('me', 2022, 95000, 86000);
+
+test('Comparables', 'same make/model, year ±1, with a price; excludes the car itself', () =>
+  eq(findComparables(ME, [...SAVED, ME]).map((c) => c.id).sort(), ['a', 'b', 'c', 'e']));
+test('Comparables', 'fewer than 3 → no saved comparison', () =>
+  eq(savedComparison(ME, SAVED.filter((c) => ['a', 'b', 'd'].includes(c.id))), null));
+test('Comparables', 'median of prices, adjusted by ₪0.15 per km from the median km', () => {
+  // prices 90k,96k,100k,110k → median 98,000; km 40k,60k,70k,80k → median 65,000
+  // this car has 86,000 km: 21,000 more → 98,000 − 0.15 × 21,000 = 94,850
+  const c = savedComparison(ME, SAVED);
+  eq([c.n, c.medianPrice, c.medianKm, c.value, c.adjusted, KM_PRICE_ADJUST], [4, 98000, 65000, 94850, true, 0.15]);
+});
+test('Comparables', 'no km on this car → plain median', () =>
+  eq(savedComparison({ ...ME, currentKm: null }, SAVED).value, 98000));
+test('Comparables', 'Levi Yitzhak overrides saved cars and AI', () => {
+  const c = resolveComparison({ ...ME, benchmarkPrice: 101000, benchmarkSource: 'levi_yitzhak' }, { others: SAVED });
+  eq([c.source, c.value], ['levi', 101000]);
+});
+test('Comparables', 'AI estimate used only when <3 comparables and the cache key matches', () => {
+  const lone = corolla('x', 2019, 70000, 120000);
+  const est = { key: estimateKey(lone), low: 66000, high: 74000 };
+  const c = resolveComparison(lone, { others: SAVED, estimate: est });
+  eq([c.source, c.value, c.low, c.high], ['ai', 70000, 66000, 74000]);
+  // km changed → stale cache → not used, but an AI estimate is needed
+  const stale = resolveComparison({ ...lone, currentKm: 125000 }, { others: SAVED, estimate: est });
+  eq([stale.source, stale.needsAi], [null, true]);
+  // saved cars available → no AI needed
+  eq(resolveComparison(ME, { others: SAVED, estimate: est }).source, 'saved');
+});
+test('Comparables', 'estimate key changes only with make, model, year or km', () => {
+  eq(estimateKey({ make: 'Kia', model: 'Niro', year: 2020, currentKm: 50000, trim: 'EX' }), estimateKey({ make: 'kia', model: 'niro', year: 2020, currentKm: 50000, trim: 'LX', askingPrice: 1 }));
+  eq(estimateKey({ make: 'Kia', model: 'Niro' }), null);
+});
+test('Estimate', 'AI range cleaned: swapped, absurd or missing → handled', () => {
+  eq(normalizeEstimate({ low: 100000, high: 90000 }), { low: 90000, high: 100000 });
+  eq(normalizeEstimate({ low: 10, high: 90000 }), { low: null, high: null });
+  eq(normalizeEstimate({ low: 20000, high: 900000 }), { low: null, high: null });
+  eq(normalizeEstimate(null), { low: null, high: null });
+  eq([estimatePrompt({ make: 'Kia', model: 'Niro', year: 2020, km: 50000, ownership: 'private' }).includes('2020 Kia Niro'), ESTIMATE_SCHEMA.required], [true, ['low', 'high']]);
+});
+
+// ---------------- Seller message (AI) ----------------
+
+test('Seller AI', 'missing details: plate first, then Slikah, service, test, ownership, trim', () => {
+  eq(sellerMissing({}), ['plate', 'slikah', 'serviceHistory', 'testExpiry', 'originalOwnership', 'trim']);
+  eq(sellerMissing({ plate: '1234567', trim: 'Sun', insuranceClaims: 'none' }), ['serviceHistory', 'testExpiry', 'originalOwnership']);
+});
+test('Seller AI', 'car-specific topics: high km, hybrid, ex-lease, 2nd+ hand (max 2)', () => {
+  eq(sellerTopics({ model: 'Corolla Hybrid', handCount: 2 }, { asOf: AS_OF }), ['hybrid', 'whySelling']);
+  eq(sellerTopics({ currentKm: 30000, firstRegistration: '2025-11', originalOwnership: 'fleet_lease', handCount: 3 }, { asOf: AS_OF }), ['highKm', 'leaseRecords']);
+  eq(sellerTopics({}, { asOf: AS_OF }), []);
+});
+test('Seller AI', 'prompt: language, max 6 questions, no scores/app, background not to be quoted', () => {
+  const p = sellerPrompt({ make: 'Toyota', model: 'Corolla', year: 2022 }, { lang: 'he', reasons: ['low km'], asOf: AS_OF });
+  eq([p.includes('Israeli Hebrew'), p.includes('at most 6'), p.includes('Never mention scores'), p.includes('Do not mention it: low km')], [true, true, true, true]);
+  eq(sellerPrompt({}, { lang: 'en' }).includes('natural, friendly English'), true);
+});
+test('Seller AI', 'message cleaned; empty → null (template fallback)', () => {
+  eq(normalizeMessage({ message: '  היי!\n\n\n\nמה המספר?  ' }), 'היי!\n\nמה המספר?');
+  eq([normalizeMessage({ message: '' }), normalizeMessage(null)], [null, null]);
 });
 
 // ---------------- runner ----------------

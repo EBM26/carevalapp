@@ -159,6 +159,8 @@ export function fromRow(row) {
   car.coverage = row.coverage;
   // Read-only cache written by /api/model-notes; not part of FIELDS, so saving a car never overwrites it.
   car.modelNotes = row.model_notes ? safeJson(row.model_notes, null) : null;
+  // Read-only cache written by /api/price-estimate (rough AI price range).
+  car.priceEstimate = row.price_estimate ? safeJson(row.price_estimate, null) : null;
   return car;
 }
 

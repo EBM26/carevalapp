@@ -9,6 +9,7 @@ import { verdict } from './verdict.js';
 import { summarize } from './summary.js';
 import { formatPlate } from './format.js';
 import { modelKey } from './modelnotes.js';
+import { quickCheck, resolveComparison, estimateKey, QUICK_CHECK_UNTIL, VERDICT_ORDER, VERDICT_TONE } from './quickcheck.js';
 
 // ---------- storage (per-device conveniences only; D1 is the source of truth) ----------
 const store = {
@@ -17,11 +18,14 @@ const store = {
 };
 
 let lang = STRINGS[store.get('lang')] ? store.get('lang') : 'en';
-let sort = ['max', 'min', 'date'].includes(store.get('sort')) ? store.get('sort') : 'max';
+const SORTS = ['max', 'min', 'date', 'quick'];
+let sort = SORTS.includes(store.get('sort')) ? store.get('sort') : 'max';
 let statusFilter = ENUMS.status.includes(store.get('status')) ? store.get('status') : '';
 let cars = [];          // last list loaded from the API
 let models = [];        // cabin-fit table
 let form = null;        // edit-screen state; survives a language switch
+let carsLoaded = false; // `cars` holds every saved car (needed for price comparables)
+let settings = { budgetCeiling: null };
 
 const view = document.getElementById('view');
 const FIELD_BY_KEY = Object.fromEntries(FIELDS.map((f) => [f.key, f]));
@@ -30,6 +34,12 @@ const $ = (id) => document.getElementById(id);
 // ---------- i18n ----------
 function t(key, vars) {
   let s = STRINGS[lang][key] ?? STRINGS.en[key] ?? key;
+  if (vars) s = s.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? '');
+  return s;
+}
+
+function tIn(l, key, vars) {
+  let s = STRINGS[l][key] ?? STRINGS.en[key] ?? key;
   if (vars) s = s.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? '');
   return s;
 }
@@ -46,6 +56,7 @@ function applyLang() {
   $('menuBtn').setAttribute('aria-label', t('menu.more'));
   $('menuExport').textContent = t('exportJson');
   $('menuImport').textContent = t('importJson');
+  $('menuSettings').textContent = t('menu.settings');
   $('menuLang').textContent = t('langToggle');
   $('menuLogout').textContent = t('logout');
 }
@@ -67,6 +78,7 @@ document.addEventListener('click', (e) => { if (!e.target.closest('.menu')) setM
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { setMenu(false); } });
 $('menuExport').addEventListener('click', () => { setMenu(false); exportJson(); });
 $('menuImport').addEventListener('click', () => { setMenu(false); $('importFile').click(); });
+$('menuSettings').addEventListener('click', () => { setMenu(false); location.hash = '#/settings'; });
 $('menuLang').addEventListener('click', () => { setMenu(false); toggleLang(); });
 $('langToggle').addEventListener('click', toggleLang);
 $('importFile').addEventListener('change', importJson);
@@ -153,6 +165,7 @@ function route() {
   const hash = location.hash || '#/';
   view.classList.remove('editing');
   if (hash === '#/new') return renderForm(null);
+  if (hash === '#/settings') return renderSettings();
   const m = /^#\/edit\/([\w-]+)$/.exec(hash);
   if (m) return renderForm(m[1]);
   return renderList();
@@ -195,6 +208,46 @@ function verdictBadge(v, short = true) {
 
 const hasFlag = (r) => r.dealBreakers.confirmed.length > 0 || r.warnings.length > 0;
 
+// ---------- quick check (stage 1) ----------
+/** Quick check for a car against the other saved cars and its cached AI estimate. */
+function quickFor(car, { estimate = car.priceEstimate, pending = false } = {}) {
+  const comparison = resolveComparison(car, { others: cars, estimate });
+  const qc = quickCheck(car, { budget: settings.budgetCeiling, comparison: comparison.value ? comparison : null, pending });
+  return { qc, comparison };
+}
+
+const reasonText = (r, l = lang) => tIn(l, r.key, r.vars);
+const qcLabel = (qc) => t(`qc.verdict.${qc.verdict}`);
+const qcLine = (qc) => (qc.reasons.length ? t('qc.line', { verdict: qcLabel(qc), reasons: qc.reasons.map((r) => reasonText(r)).join(', ') }) : qcLabel(qc));
+const qcBadge = (qc) => h(`span.badge.${VERDICT_TONE[qc.verdict]}`, { title: qcLine(qc) }, qcLabel(qc));
+
+/** Headline for a car: the quick check below 50% coverage, the full score from 50%. */
+function headline(car, r, v, qc) {
+  if (r.coverage < QUICK_CHECK_UNTIL) return { stage: 'quick', badge: qcBadge(qc) };
+  return { stage: 'full', badge: verdictBadge(v) };
+}
+
+/** One sentence comparing the asking price with the comparison source. */
+function comparisonText(car, cmp, est) {
+  const price = num(car.askingPrice);
+  if (price === null) return { text: t('cmp.noPrice') };
+  if (!cmp.value) {
+    const key = estimateKey(car);
+    if (cmp.needsAi && est && est.key === key) {
+      if (est.status === 'loading' || est.status === 'scheduled') return { text: t('cmp.loading'), muted: true };
+      if (est.status === 'error') return { text: `${t('cmp.aiUnavailable')} ${t('cmp.none')}`, muted: true };
+      if (est.status === 'unknown') return { text: `${t('cmp.aiUnknown')} ${t('cmp.none')}`, muted: true };
+    }
+    return { text: t('cmp.none') };
+  }
+  const diff = price - cmp.value;
+  const dir = Math.abs(diff) < 500 ? 'same' : diff < 0 ? 'below' : 'above';
+  const vars = { diff: fmt.format(Math.abs(diff)), n: cmp.n, low: fmt.format(cmp.low ?? 0), high: fmt.format(cmp.high ?? 0) };
+  if (cmp.source === 'saved') return { source: 'saved', text: `${t(`cmp.saved.${dir}`, vars)}${cmp.adjusted ? ` ${t('cmp.saved.adjusted')}` : ''}` };
+  if (cmp.source === 'ai') return { source: 'ai', text: `${t('cmp.ai.range', vars)} ${t(`cmp.ai.${dir}`, vars)}`, muted: true };
+  return { source: cmp.source, text: t(`cmp.manual.${dir}`, vars) };
+}
+
 /** Segmented control: a radio group styled as connected buttons. options: [[value, label]]. */
 function seg(name, options, current, { small = false, label } = {}) {
   return h(`div.seg${small ? '.small' : ''}`, { role: 'radiogroup', 'aria-label': label },
@@ -228,7 +281,7 @@ async function renderList() {
   statusSeg.addEventListener('input', (e) => onStatus(e.target.value));
   const controls = h('div.list-controls', {},
     h('label.ctl.ctl-sort', {}, h('span', {}, t('sort')),
-      select('sort', ['max', 'min', 'date'].map((s) => [s, t(`sort.${s}`)]), sort, (e) => {
+      select('sort', SORTS.map((s) => [s, t(`sort.${s}`)]), sort, (e) => {
         sort = e.target.value; store.set('sort', sort); renderList();
       })),
     h('div.ctl.status-seg', {}, h('span', {}, t('filterStatus')), statusSeg),
@@ -240,14 +293,24 @@ async function renderList() {
   requestAnimationFrame(() => fitSegs(controls));
 
   try {
-    const qs = new URLSearchParams({ sort });
-    if (statusFilter) qs.set('status', statusFilter);
-    cars = await api('GET', `/api/cars?${qs}`);
+    // Always load every car: the quick check compares prices across all saved cars.
+    cars = await api('GET', `/api/cars?${new URLSearchParams({ sort: sort === 'quick' ? 'max' : sort })}`);
+    carsLoaded = true;
   } catch (e) {
     list.replaceChildren(h('div.msg.error', {}, t('loadError', { msg: e.message })));
     return;
   }
-  if (!cars.length) {
+  let shown = statusFilter ? cars.filter((c) => c.status === statusFilter) : cars.slice();
+  const rowsData = shown.map((car) => {
+    const r = scoreCar(car);
+    return { car, r, v: verdict(r), ...quickFor(car) };
+  });
+  if (sort === 'quick') {
+    // Pursue, then Maybe, then Skip; ties keep the best-case order from the API.
+    rowsData.sort((a, b) => VERDICT_ORDER[a.qc.verdict] - VERDICT_ORDER[b.qc.verdict]);
+  }
+  shown = rowsData;
+  if (!shown.length) {
     list.replaceChildren(statusFilter
       ? h('div.empty', {}, h('p', {}, t('emptyFiltered')))
       : h('div.empty', {}, h('p', {}, t('emptyNew')), h('a.btn.primary', { href: '#/new' }, t('addCarBtn'))));
@@ -256,19 +319,18 @@ async function renderList() {
   const head = h('div.row-head', { 'aria-hidden': 'true' },
     h('span', {}, t('col.plate')), h('span', {}, t('col.car')), h('span.end', {}, t('col.price')), h('span.end', {}, t('col.km')),
     h('span', {}, t('col.score')), h('span', {}, t('col.verdict')), h('span.end', {}, t('col.known')), h('span', {}, t('col.status')), h('span'));
-  list.replaceChildren(h('div.rows', {}, head, ...cars.map(carRow)));
+  list.replaceChildren(h('div.rows', {}, head, ...shown.map(carRow)));
 }
 
-function carRow(car) {
-  const r = scoreCar(car);
-  const v = verdict(r);
+function carRow({ car, r, v, qc }) {
+  const hl = headline(car, r, v, qc);
   const dash = h('span.muted', {}, '—');
   return h('a.row', { href: `#/edit/${car.id}` },
     h('div.l1', {},
       plateBadge(car.plate),
       h('span.title', {}, h('bdi', { dir: 'auto' }, carTitle(car))),
       hasFlag(r) ? flagIcon() : h('span.flag-slot', { 'aria-hidden': 'true' }),
-      verdictBadge(v)),
+      h('span.verdict-cell', {}, hl.badge, h('span.stage', {}, t(hl.stage === 'quick' ? 'stage.quickShort' : 'stage.fullShort')))),
     h('div.l2', {},
       scoreBar(r, v),
       h('span.cov', {}, ltr(`${r.coverage}%`)),
@@ -401,6 +463,11 @@ function buildCar(draft) {
 
 async function renderForm(id) {
   if (!form || form.id !== id) {
+    if (!carsLoaded) {
+      // Price comparables need every saved car, also when opening a car directly.
+      view.replaceChildren(h('div.msg', {}, t('loading')));
+      try { cars = await api('GET', '/api/cars'); carsLoaded = true; } catch { /* comparisons fall back */ }
+    }
     let draft = emptyDraft();
     if (id) {
       let car = cars.find((c) => c.id === id);
@@ -416,7 +483,12 @@ async function renderForm(id) {
       draft = structuredClone(car);
     }
     // Seller message language defaults to Hebrew regardless of the UI language.
-    form = { id, draft, sellerLang: 'he', notes: null };
+    form = { id, draft, sellerLang: 'he', notes: null, seller: { status: 'idle', text: '', version: 0 }, estimate: null };
+    const ek = estimateKey(draft);
+    if (draft.priceEstimate && ek && draft.priceEstimate.key === ek) {
+      const pe = draft.priceEstimate;
+      form.estimate = { key: ek, status: pe.low && pe.high ? 'done' : 'unknown', low: pe.low, high: pe.high };
+    }
     const mk = modelKey(draft);
     if (draft.modelNotes && mk && draft.modelNotes.key === mk) {
       form.notes = { status: 'done', key: mk, items: draft.modelNotes.items || [] };
@@ -767,26 +839,118 @@ async function renderForm(id) {
     renderPanel();
   }
 
-  // ----- seller message (kept as one element so in-progress taps survive re-renders) -----
-  function renderSeller(car) {
-    const msg = buildSellerMessage(car, form.sellerLang);
-    const key = JSON.stringify([lang, form.sellerLang, msg, car.sellerPhone]);
+  // ----- AI price estimate (rough; only when <3 comparable saved cars) -----
+  let estTimer;
+  function scheduleEstimate(car, key) {
+    clearTimeout(estTimer);
+    form.estimate = { key, status: 'scheduled' };
+    estTimer = setTimeout(() => fetchEstimate(car, key), 900);
+  }
+
+  async function fetchEstimate(car, key) {
+    const session = form;
+    if (form.estimate?.key !== key) return;
+    form.estimate = { key, status: 'loading' };
+    renderPanel();
+    try {
+      const res = await api('POST', '/api/price-estimate', {
+        id: id || undefined, make: car.make, model: car.model, trim: car.trim, year: car.year,
+        km: car.currentKm, ownership: car.originalOwnership,
+      });
+      if (form !== session || form.estimate?.key !== key) return;
+      form.estimate = { key, status: res.low && res.high ? 'done' : 'unknown', low: res.low, high: res.high };
+    } catch (e) {
+      if (form !== session || form.estimate?.key !== key) return;
+      form.estimate = { key, status: 'error', message: e.message };
+    }
+    renderPanel();
+  }
+
+  // ----- seller message: written by the AI, editable; template if the API fails -----
+  async function writeMessage() {
+    const car = buildCar(draft);
+    const { qc } = currentQuick(car);
+    const session = form;
+    form.seller = { ...form.seller, status: 'loading' };
+    renderSeller(car, qc);
+    let text;
+    let status;
+    try {
+      const res = await api('POST', '/api/seller-message', {
+        car, lang: form.sellerLang, reasons: qc.reasons.map((r) => reasonText(r, 'en')),
+      });
+      text = res.message;
+      status = 'done';
+    } catch {
+      text = buildSellerMessage(car, form.sellerLang) || '';
+      status = 'fallback';
+    }
+    if (form !== session) return;
+    form.seller = { status, text, version: form.seller.version + 1 };
+    renderSeller(buildCar(draft), qc);
+  }
+
+  // Kept as one element so in-progress taps and typing survive panel re-renders.
+  function renderSeller(car, qc) {
+    const st = form.seller;
+    const key = JSON.stringify([lang, form.sellerLang, st.status, st.version, car.sellerPhone, qc.verdict === 'SKIP']);
     if (sellerBox.dataset.key === key) return;
     sellerBox.dataset.key = key;
     const langSeg = seg('sellerLang', ['he', 'en'].map((l) => [l, t(`langName.${l}`)]), form.sellerLang, { small: true, label: t('seller.lang') });
-    langSeg.addEventListener('input', (e) => { form.sellerLang = e.target.value; renderSeller(buildCar(draft)); });
-    const head = h('div.seller-head', {}, h('h3', {}, t('seller.title')), langSeg);
-    if (!msg) {
-      sellerBox.replaceChildren(head, h('div.note', {}, t('seller.nothing')));
+    langSeg.addEventListener('input', (e) => {
+      form.sellerLang = e.target.value;
+      if (form.seller.text) writeMessage(); else { sellerBox.dataset.key = ''; renderSeller(buildCar(draft), qc); }
+    });
+    const kids = [h('div.seller-head', {}, h('h3', {}, t('seller.title')), langSeg)];
+    if (qc.verdict === 'SKIP') kids.push(h('div.note', {}, t('seller.skipNote')));
+    const loading = st.status === 'loading';
+    if (!st.text) {
+      kids.push(h('div.note', {}, t('seller.intro')));
+      kids.push(h('div.seller-actions', {},
+        h('button.btn.small.primary', { type: 'button', onclick: writeMessage, disabled: loading }, t(loading ? 'seller.writing' : 'seller.write'))));
+      sellerBox.replaceChildren(...kids);
       return;
     }
-    const text = h('textarea', { readonly: true, rows: 5, dir: form.sellerLang === 'he' ? 'rtl' : 'ltr', lang: form.sellerLang, value: msg, 'aria-label': t('seller.title') });
-    const link = waLink(car.sellerPhone, msg);
-    sellerBox.replaceChildren(head, text,
-      h('div.seller-actions', {},
-        h('button.btn.small', { type: 'button', onclick: () => copyText(msg, text) }, t('seller.copy')),
-        link ? h('a.btn.small.wa', { href: link, target: '_blank', rel: 'noopener' }, t('seller.whatsapp'))
-          : h('span.note', {}, t('seller.noPhone'))));
+    const text = h('textarea', { rows: 6, dir: form.sellerLang === 'he' ? 'rtl' : 'ltr', lang: form.sellerLang, value: st.text, 'aria-label': t('seller.title'), disabled: loading });
+    const wa = waLink(car.sellerPhone, st.text);
+    const waBtn = wa ? h('a.btn.small.wa', { href: wa, target: '_blank', rel: 'noopener' }, t('seller.whatsapp')) : null;
+    text.addEventListener('input', () => {
+      form.seller.text = text.value;
+      if (waBtn) waBtn.href = waLink(car.sellerPhone, text.value);
+    });
+    if (st.status === 'fallback') kids.push(h('div.note', {}, t('seller.fallback')));
+    kids.push(text, h('div.seller-actions', {},
+      h('button.btn.small', { type: 'button', onclick: () => copyText(text.value, text) }, t('seller.copy')),
+      waBtn,
+      h('button.btn.small', { type: 'button', onclick: writeMessage, disabled: loading }, t(loading ? 'seller.writing' : 'seller.rewrite')),
+      wa ? null : h('span.note', {}, t('seller.noPhone'))));
+    sellerBox.replaceChildren(...kids);
+  }
+
+  /** Quick check with the in-form AI estimate state. */
+  function currentQuick(car) {
+    const key = estimateKey(car);
+    const est = form.estimate && form.estimate.key === key ? form.estimate : null;
+    const pending = Boolean(est && (est.status === 'scheduled' || est.status === 'loading'));
+    // buildCar() strips the id; keep it so the car isn't counted as its own comparable.
+    return { ...quickFor({ ...car, id }, { estimate: est?.status === 'done' ? est : null, pending }), est, key };
+  }
+
+  function quickSection(car, qc, comparison, est, asHeadline) {
+    const cmpInfo = comparisonText(car, comparison, est);
+    const joined = qc.reasons.map((r) => reasonText(r)).join(', ');
+    const reasons = joined ? joined[0].toLocaleUpperCase(lang) + joined.slice(1) : ''; // sentence case
+    const body = [
+      asHeadline ? h('div.stage-label', {}, t('stage.quick')) : null,
+      asHeadline ? h('div.verdict-main', {}, h(`span.verdict-word.${VERDICT_TONE[qc.verdict]}`, {}, qcLabel(qc))) : null,
+      asHeadline ? (reasons ? h('div.qc-reasons', {}, h('bdi', { dir: 'auto' }, reasons)) : h('div.verdict-sub', {}, t('qc.fromAd')))
+        : h('div.qc-reasons', {}, h('bdi', { dir: 'auto' }, qcLine(qc))),
+      ...qc.notes.map((n) => h('div.qc-note', {}, t(n.key))),
+      h(`div.cmp${cmpInfo.muted ? '.muted' : ''}`, {},
+        cmpInfo.source ? h('span.cmp-src', {}, t(`cmp.source.${cmpInfo.source}`)) : h('span.cmp-src', {}, t('cmp.title')),
+        ' ', ltrNums(cmpInfo.text)),
+    ];
+    return body;
   }
 
   function focusField(key) {
@@ -816,7 +980,16 @@ async function renderForm(id) {
     const r = scoreCar(car);
     const v = verdict(r);
     const s = summarize(car, r);
-    renderSeller(car);
+    let cq = currentQuick(car);
+    // Ask the AI for a rough price only when it would be used: asking price known,
+    // no benchmark entered, fewer than 3 comparables, nothing cached for this key.
+    if (cq.comparison.needsAi && !cq.comparison.value && num(car.askingPrice) !== null && cq.key && !cq.est) {
+      scheduleEstimate(car, cq.key);
+      cq = currentQuick(car); // now pending, so "no comparison" isn't flagged meanwhile
+    }
+    const { qc, comparison, est } = cq;
+    renderSeller(car, qc);
+    const quickStage = r.coverage < QUICK_CHECK_UNTIL;
 
     // Group headers: category points range, e.g. 18–25 / 25.
     for (const g of GROUPS) {
@@ -837,9 +1010,16 @@ async function renderForm(id) {
         dirs.map((d) => h('p.direction', { style: 'margin:0' }, ICON.alert(), h('span', {}, d)))));
     }
 
-    // 2. Verdict first; range as secondary text.
-    const word = h(`span.verdict-word.${v.tone}`, {}, verdictLabel(v, false));
-    sections.push(h('section.panel-sec.verdict', {},
+    // Below 50% coverage: quick check is the headline, then the seller message (stage 2).
+    if (quickStage) {
+      sections.push(h('section.panel-sec.quick', {}, quickSection(car, qc, comparison, est, true)));
+      sections.push(sellerBox);
+    }
+
+    // 2. Full-score verdict (headline from 50% coverage); range as secondary text.
+    const word = h(`span.verdict-word.${v.tone}${quickStage ? '.secondary' : ''}`, {}, verdictLabel(v, false));
+    sections.push(h(`section.panel-sec.verdict${quickStage ? '.full-later' : ''}`, {},
+      quickStage ? h('div.stage-label', {}, t('stage.full')) : null,
       h('div.verdict-main', {}, word, v.upTo ? h('span.verdict-up', {}, t('verdict.possibly', { rating: t(`rating.${v.upTo}`) })) : null),
       v.kind === 'TOO_EARLY' ? h('div.verdict-sub', {}, ltrNums(t('verdict.pointsSoFar', { x: v.known.x, y: v.known.y }))) : null,
       h('div.verdict-sub', {}, ltrNums(t('verdict.range', { min: r.scoreMin, max: r.scoreMax, n: r.coverage }))),
@@ -897,12 +1077,15 @@ async function renderForm(id) {
     const breakdown = [h('table.breakdown', {}, h('tbody', {}, rows)), ...r.notes.map((n) => h('div.note', { style: 'margin-top:8px' }, t(`note.${n}`)))];
     sections.push(h('section.panel-sec', {}, disclose('breakdownOpen', t('breakdown'), '', breakdown)));
 
-    // 7. Seller message.
-    sections.push(sellerBox);
+    // From 50%: the quick check is available collapsed, then the seller message.
+    if (!quickStage) {
+      sections.push(h('section.panel-sec', {}, disclose('qcOpen', `${t('stage.quick')}: ${qcLabel(qc)}`, '', quickSection(car, qc, comparison, est, false))));
+      sections.push(sellerBox);
+    }
 
     // Mobile summary bar (fixed bottom): verdict, range, coverage, Save.
     const toggle = h('button.panel-toggle', { type: 'button', 'aria-expanded': String(Boolean(form.panelOpen)), 'aria-label': t(form.panelOpen ? 'panel.close' : 'panel.open') },
-      h('span.line', {}, verdictBadge(v), ltrNums(t('verdict.rangeShort', { min: r.scoreMin, max: r.scoreMax, n: r.coverage })), hasFlag(r) ? flagIcon() : null),
+      h('span.line', {}, quickStage ? qcBadge(qc) : verdictBadge(v), h('span.stage', {}, t(quickStage ? 'stage.quickShort' : 'stage.fullShort')), ltrNums(t('verdict.rangeShort', { min: r.scoreMin, max: r.scoreMax, n: r.coverage })), hasFlag(r) ? flagIcon() : null),
       scoreBar(r, v));
     toggle.addEventListener('click', () => {
       form.panelOpen = !form.panelOpen;
@@ -929,6 +1112,12 @@ async function renderForm(id) {
       if (!id && saved?.id && form.notes?.status === 'done' && form.notes.key === key) {
         api('POST', '/api/model-notes', { id: saved.id, make: car.make, model: car.model, year: car.year, items: form.notes.items }).catch(() => {});
       }
+      const ek = estimateKey(car);
+      if (!id && saved?.id && form.estimate?.status === 'done' && form.estimate.key === ek) {
+        api('POST', '/api/price-estimate', { id: saved.id, make: car.make, model: car.model, trim: car.trim, year: car.year,
+          km: car.currentKm, ownership: car.originalOwnership, estimate: { low: form.estimate.low, high: form.estimate.high } }).catch(() => {});
+      }
+      carsLoaded = false; // the list reloads everything
       location.hash = '#/';
     } catch (e) {
       toast(t('saveError', { msg: e.message }));
@@ -960,6 +1149,39 @@ async function renderForm(id) {
   renderShot();
   renderPanel();
   requestAnimationFrame(() => fitSegs(view));
+}
+
+// ---------- settings ----------
+async function loadSettings() {
+  try { settings = { budgetCeiling: null, ...(await api('GET', '/api/settings')) }; } catch { /* defaults */ }
+}
+
+function renderSettings() {
+  const input = h('input', { type: 'text', inputmode: 'numeric', name: 'budgetCeiling', autocomplete: 'off',
+    value: settings.budgetCeiling ? fmt.format(settings.budgetCeiling) : '' });
+  input.addEventListener('blur', () => { const n = num(input.value); if (n !== null) input.value = fmt.format(n); });
+  const saveB = h('button.btn.primary', { type: 'submit' }, t('save'));
+  const formEl = h('form.settings', { novalidate: true, onsubmit: async (e) => {
+    e.preventDefault();
+    saveB.disabled = true;
+    try {
+      const res = await api('PUT', '/api/settings', { budgetCeiling: num(input.value) });
+      settings = { ...settings, ...res, unavailable: false };
+      toast(t('settings.saved'));
+      location.hash = '#/';
+    } catch (err) {
+      toast(t('settings.error', { msg: err.message }));
+      saveB.disabled = false;
+    }
+  } },
+  h('label.field', {}, h('span.label', {}, t('settings.budget')),
+    h('span.unit-field', {}, input, h('span.unit', { 'aria-hidden': 'true' }, '₪')),
+    h('span.hint', {}, t('settings.budgetHint'))),
+  settings.unavailable ? h('div.warn-text', {}, t('settings.unavailable')) : null,
+  h('div.form-actions', {}, saveB, h('a.btn', { href: '#/' }, t('cancel'))));
+  view.replaceChildren(
+    h('div.edit-head', {}, h('a.btn.link', { href: '#/', style: 'padding-inline:0' }, t('back')), h('h1', {}, t('settings.title'))),
+    h('div.settings-wrap', {}, formEl));
 }
 
 /** Wrap digit runs (scores, %, ranges) so they never reorder in RTL. */
@@ -1024,4 +1246,4 @@ async function copyText(text, textarea) {
 // ---------- boot ----------
 applyLang();
 loadModels().then(() => { if (form) route(); });
-route();
+loadSettings().finally(route);
