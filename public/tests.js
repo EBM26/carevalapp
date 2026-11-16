@@ -6,6 +6,7 @@ import { scoreCar, band, num, ENUMS, DEAL_BREAKERS, WEIGHTS } from './scoring.js
 import { FIELDS, sanitizeCar } from './fields.js';
 import { STRINGS, SELLER } from './i18n.js';
 import { buildSellerMessage, waNumber, waLink } from './seller.js';
+import { mapGov, mergeGov, stripCountry, normYm } from './govmap.js';
 
 const AS_OF = '2026-11-16';
 const S = (car) => scoreCar(car, { asOf: AS_OF });
@@ -343,6 +344,88 @@ test('Seller', 'wa.me number from Israeli formats', () =>
 test('Seller', 'wa.me link has the message URL-encoded', () =>
   eq(waLink('050-1234567', 'היי? a&b'), `https://wa.me/972501234567?text=${encodeURIComponent('היי? a&b')}`));
 test('Seller', 'no phone → no link', () => eq(waLink(null, 'x'), null));
+
+// ---------------- Gov data mapping ----------------
+// Fixtures are real records fetched from data.gov.il on 2026-11-16.
+
+const OCTAVIA = {
+  registry: { mispar_rechev: 36181801, tozeret_nm: "סקודה צ'כיה", ramat_gimur: 'RS', shnat_yitzur: 2017, mivchan_acharon_dt: '2025-12-08',
+    tokef_dt: '2026-12-04', baalut: 'פרטי', tzeva_rechev: 'אדום', sug_delek_nm: 'בנזין', moed_aliya_lakvish: '2017-12', kinuy_mishari: 'OCTAVIA' },
+  history: { mispar_rechev: 36181801, kilometer_test_aharon: 114529, shinui_mivne_ind: 1, gapam_ind: 0, shnui_zeva_ind: 1,
+    shinui_zmig_ind: 0, rishum_rishon_dt: '2017-12-05', mkoriut_nm: '' },
+  ownership: [
+    [201712, 'חברה'], [201805, 'פרטי'], [201912, 'פרטי'], [202001, 'סוחר'], [202001, 'פרטי'],
+    [202007, 'פרטי'], [202102, 'פרטי'], [202210, 'סוחר'], [202302, 'פרטי'],
+  ].map(([d, b], i) => ({ _id: i + 1, mispar_rechev: 36181801, baalut_dt: d, baalut: b })),
+};
+const A3 = {
+  registry: { tozeret_nm: 'אאודי גרמניה', ramat_gimur: 'ADV TAC PREM', shnat_yitzur: 2023, mivchan_acharon_dt: '2026-05-11',
+    tokef_dt: '2027-04-22', baalut: 'פרטי', moed_aliya_lakvish: '2023-4', kinuy_mishari: 'A3 SEDAN' },
+  history: { kilometer_test_aharon: 47831, shinui_mivne_ind: 1, shnui_zeva_ind: 1, shinui_zmig_ind: 0, rishum_rishon_dt: '2023-04-23', mkoriut_nm: '' },
+  ownership: [{ _id: 2, baalut_dt: 202502, baalut: 'פרטי' }, { _id: 1, baalut_dt: 202304, baalut: 'פרטי' }],
+};
+
+test('Gov', 'Octavia: registry + history fields mapped', () => {
+  const { fields: f } = mapGov(OCTAVIA);
+  eq([f.make, f.model, f.trim, f.year, f.firstRegistration, f.testExpiry, f.lastTestDate, f.lastTestKm, f.govStructuralChange],
+    ['סקודה', 'OCTAVIA', 'RS', 2017, '2017-12', '2026-12-04', '2025-12-08', 114529, true]);
+});
+test('Gov', 'Octavia: dealer rows excluded → 7 hands, original = company (fleet)', () => {
+  const { fields: f, hints } = mapGov(OCTAVIA);
+  eq(f.handCount, 7);
+  eq(f.originalOwnership, 'fleet_lease');
+  eq(f.ownershipHistory.map((o) => o.type), ['fleet_lease', 'private', 'private', 'private', 'private', 'private', 'private']);
+  eq(f.ownershipHistory[0].from, '2017-12-01');
+  eq(hints, [{ code: 'dealer_excluded', n: 2 }, { code: 'company_owner' }]);
+});
+test('Gov', 'A3: unpadded month "2023-4" → "2023-04"; owners sorted by date', () => {
+  const { fields: f } = mapGov(A3);
+  eq([f.make, f.firstRegistration, f.handCount, f.originalOwnership], ['אאודי', '2023-04', 2, 'private']);
+  eq(f.ownershipHistory.map((o) => o.from), ['2023-04-01', '2025-02-01']);
+});
+test('Gov', 'originality (mkoriut_nm) overrides first owner: rental company → rental', () => {
+  const { fields: f } = mapGov({ ...A3, history: { ...A3.history, mkoriut_nm: 'השכרה' }, ownership: [{ _id: 1, baalut_dt: 202304, baalut: 'חברה' }] });
+  eq([f.originalOwnership, f.ownershipHistory[0].type], ['rental', 'rental']);
+});
+test('Gov', 'driving school originality (with stray quote in source data)', () =>
+  eq(mapGov({ history: { mkoriut_nm: 'ביס לנהיגה"' } }).fields.originalOwnership, 'driving_school'));
+test('Gov', 'lease (החכר) → fleet lease, flagged as assumed', () => {
+  const g = mapGov({ ownership: [{ _id: 1, baalut_dt: 202001, baalut: 'החכר' }] });
+  eq(g.fields.originalOwnership, 'fleet_lease');
+  eq(g.hints.map((h) => h.code), ['lease_type_unknown']);
+});
+test('Gov', 'ownership dataset failed (null) → ownership fields stay unknown', () => {
+  const { fields: f } = mapGov({ ...A3, ownership: null });
+  eq([f.handCount, f.originalOwnership, f.ownershipHistory], [null, null, null]);
+});
+test('Gov', 'history missing → structural flag unknown, not false', () =>
+  eq(mapGov({ registry: A3.registry, history: null, ownership: [] }).fields.govStructuralChange, null));
+test('Gov', 'stripCountry / normYm helpers', () => {
+  eq([stripCountry('טויוטה יפן'), stripCountry('מרצדס בנץ גרמניה'), stripCountry('BYD')], ['טויוטה', 'מרצדס בנץ', 'BYD']);
+  eq([normYm('2023-4'), normYm('2017-12'), normYm('2023-13'), normYm('')], ['2023-04', '2017-12', null, null]);
+});
+test('Gov', 'gov fields + structural flag feed scoring: warning appears, km/yr from test date', () => {
+  const car = mergeGov({ currentKm: 100000 }, mapGov(OCTAVIA).fields).car;
+  const r = S(car);
+  eq(r.warnings, ['odometer_rollback', 'structural_change']);
+});
+
+test('Merge', 'gov fills only empty fields and marks them as gov-sourced', () => {
+  const { car, filled, conflicts } = mergeGov({ make: 'סקודה', currentKm: '120,000', fieldSources: { make: 'manual' } }, mapGov(OCTAVIA).fields);
+  eq(filled.includes('make'), false);
+  eq(filled.includes('trim') && filled.includes('lastTestKm') && filled.includes('handCount'), true);
+  eq(conflicts, []);
+  eq([car.fieldSources.make, car.fieldSources.trim, car.trim], ['manual', 'gov', 'RS']);
+});
+test('Merge', 'differing values are reported as conflicts and not overwritten', () => {
+  const { car, conflicts } = mergeGov({ year: '2018', model: 'octavia', handCount: '2' }, mapGov(OCTAVIA).fields);
+  eq(conflicts.map((c) => [c.key, c.mine, c.gov]), [['year', 2018, 2017], ['handCount', 2, 7]]);
+  eq([car.year, car.handCount], ['2018', '2']);
+});
+test('Merge', 'same value in different case is not a conflict', () =>
+  eq(mergeGov({ model: 'Octavia' }, { model: 'OCTAVIA' }).conflicts, []));
+test('Merge', 'structural flag is always taken from gov (no conflict)', () =>
+  eq(mergeGov({ govStructuralChange: false }, { govStructuralChange: true }).car.govStructuralChange, true));
 
 // ---------------- runner ----------------
 

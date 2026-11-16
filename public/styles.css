@@ -120,6 +120,15 @@ details.more[open] { padding-block-end: 4px; }
 .next-steps li { margin-block-end: 4px; }
 .next-steps .note { display: block; }
 
+.gov { grid-column: 1 / -1; display: grid; gap: 6px; justify-items: start; }
+.gov > * { justify-self: stretch; }
+.gov > button { justify-self: start; }
+.warn-soft { color: var(--red); font-size: 14px; }
+.conflict { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: grid; gap: 4px; }
+.conflict-label { font-size: 13px; color: var(--muted); }
+.conflict-vals { display: grid; gap: 2px; font-size: 14px; }
+.conflict-actions { display: flex; gap: 8px; }
+
 .seller {
   border: 1px solid var(--line); border-radius: var(--radius); padding: 12px;
   margin-block-end: 20px; display: grid; gap: 8px; background: var(--soft);

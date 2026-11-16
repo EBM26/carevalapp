@@ -1,8 +1,9 @@
 // app.js — UI and state. All visible text comes from i18n.js via t().
 import { scoreCar, ENUMS, DEAL_BREAKERS, num } from './scoring.js';
-import { FIELDS, sanitizeCar } from './fields.js';
+import { FIELDS, sanitizeCar, cleanValue } from './fields.js';
 import { STRINGS } from './i18n.js';
 import { buildSellerMessage, waLink } from './seller.js';
+import { mergeGov } from './govmap.js';
 
 // ---------- storage (per-device conveniences only; D1 is the source of truth) ----------
 const store = {
@@ -87,7 +88,7 @@ async function api(method, path, body) {
   // Behind Cloudflare Access an expired session returns a login page, not JSON.
   if (!(res.headers.get('content-type') || '').includes('application/json')) throw new Error(t('sessionExpired'));
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { data, status: res.status });
   return data;
 }
 
@@ -273,7 +274,7 @@ async function loadModels() {
 
 // ---------- form view ----------
 const SECTIONS = [
-  ['listing', ['plate', 'make', 'model', 'trim', 'year', 'status', 'listingUrl:full', 'sellerPhone']],
+  ['listing', ['plate', 'govFetch', 'make', 'model', 'trim', 'year', 'status', 'listingUrl:full', 'sellerPhone']],
   ['price', ['askingPrice', 'benchmarkPrice', 'yad2Low', 'yad2High', 'hint:benchmarkHint']],
   ['mileage', ['firstRegistration', 'currentKm', 'lastTestKm', 'lastTestDate']],
   ['ownership', ['originalOwnership', 'handCount', 'owners']],
@@ -337,6 +338,85 @@ async function renderForm(id) {
   const panel = h('section.score-panel', { 'aria-live': 'polite' });
   const details = h('section.score-details');
   const sellerBox = h('section.seller');
+  const govBox = h('div.gov.full');
+
+  // ----- gov lookup -----
+  function displayValue(key, v) {
+    if (v === null || v === undefined || v === '') return t('unknown');
+    if (key === 'ownershipHistory') return v.map((o) => (o?.type ? t(`ownershipType.${o.type}`) : '?')).join(' → ');
+    const prefix = ENUM_I18N[key];
+    if (prefix) return t(`${prefix}.${v}`);
+    if (typeof v === 'number' && key !== 'year') return fmt.format(v);
+    return String(v);
+  }
+
+  async function fetchGov() {
+    const plate = cleanValue('plate', draft.plate);
+    if (!plate) { form.gov = { status: 'error', message: t('gov.needPlate') }; renderGov(); return; }
+    form.gov = { status: 'loading' };
+    renderGov();
+    const session = form;
+    try {
+      const res = await api('GET', `/api/gov?plate=${plate}`);
+      if (form !== session) return; // user left the form while the lookup ran
+      if (!res.found) {
+        form.gov = { status: 'notFound', failed: res.failed };
+      } else {
+        const m = mergeGov(draft, res.fields);
+        Object.assign(draft, m.car);
+        form.gov = { status: 'done', filled: m.filled, conflicts: m.conflicts, hints: res.hints, extra: res.extra, failed: res.failed };
+      }
+    } catch (e) {
+      if (form !== session) return;
+      const failed = e.data?.failed;
+      form.gov = { status: 'error', message: failed ? t('gov.unavailable', { msg: failed.map((f) => f.reason).join('; ') }) : e.message };
+    }
+    // Re-render the whole form so filled inputs show their new values.
+    renderForm(id);
+  }
+
+  function resolveConflict(c, useGov) {
+    if (useGov) {
+      draft[c.key] = c.gov;
+      draft.fieldSources = { ...draft.fieldSources, [c.key]: 'gov' };
+    }
+    form.gov.conflicts = form.gov.conflicts.filter((x) => x !== c);
+    if (useGov) renderForm(id); else renderGov();
+  }
+
+  function renderGov() {
+    const g = form.gov || { status: 'idle' };
+    const btn = h('button.btn.small', { type: 'button', onclick: fetchGov, disabled: g.status === 'loading' },
+      t(g.status === 'loading' ? 'gov.loading' : 'gov.fetch'));
+    const kids = [btn];
+    const failedNote = g.failed?.length
+      ? h('div.warn-soft', {}, t('gov.partial', { list: g.failed.map((f) => t(`gov.ds.${f.dataset}`)).join(', ') }))
+      : null;
+    if (g.status === 'error') kids.push(h('div.warn-soft', {}, g.message));
+    if (g.status === 'notFound') kids.push(h('div.note', {}, t('gov.notFound')), failedNote);
+    if (g.status === 'done') {
+      kids.push(h('div.note', {}, t('gov.applied', { n: g.filled.length })), failedNote);
+      for (const hint of g.hints || []) kids.push(h('div.note', {}, t(`gov.hint.${hint.code}`, hint)));
+      const x = g.extra || {};
+      if (x.colorChanged) kids.push(h('div.note', {}, t('gov.extra.colorChanged')));
+      if (x.tiresChanged) kids.push(h('div.note', {}, t('gov.extra.tiresChanged')));
+      if (x.personalImport) kids.push(h('div.note', {}, t('gov.extra.personalImport')));
+      if (g.conflicts?.length) {
+        kids.push(h('strong', {}, t('gov.conflicts')));
+        for (const c of g.conflicts) {
+          kids.push(h('div.conflict', {},
+            h('div.conflict-label', {}, t(`field.${c.key}`)),
+            h('div.conflict-vals', {},
+              h('span', {}, t('gov.yours'), ': ', h('bdi', { dir: 'auto' }, displayValue(c.key, c.mine))),
+              h('span', {}, t('gov.gov'), ': ', h('bdi', { dir: 'auto' }, displayValue(c.key, c.gov)))),
+            h('div.conflict-actions', {},
+              h('button.btn.small', { type: 'button', onclick: () => resolveConflict(c, false) }, t('gov.useMine')),
+              h('button.btn.small', { type: 'button', onclick: () => resolveConflict(c, true) }, t('gov.useGov')))));
+        }
+      }
+    }
+    govBox.replaceChildren(...kids.filter(Boolean));
+  }
   const ownersBox = h('div.grid.full', { style: 'grid-column:1/-1' });
   const suggestBox = h('div.suggest');
 
@@ -344,6 +424,7 @@ async function renderForm(id) {
     const [key, mod] = spec.split(':');
     if (key === 'hint') return h('div.hint', {}, t(mod));
     if (key === 'owners') return ownersBox;
+    if (key === 'govFetch') return govBox;
     if (key === 'dealBreakers') return dealBreakerControls(draft);
     const f = FIELD_BY_KEY[key];
     const val = draft[key] ?? '';
@@ -510,6 +591,7 @@ async function renderForm(id) {
 
   renderOwners();
   renderSuggest();
+  renderGov();
   renderPanel();
   view.replaceChildren(
     h('div.form-head', {}, h('h1', {}, t(id ? 'editCar' : 'newCar')), h('a.btn.ghost', { href: '#/' }, t('back'))),
