@@ -10,10 +10,11 @@ import { verdict, knownPoints } from './verdict.js';
 import { summarize } from './summary.js';
 import { formatPlate } from './format.js';
 import { matchModel, sameName, canonicalMake } from './modelmatch.js';
-import { registryMismatches, valueKey } from './govcompare.js';
+import { registryMismatches, valueKey, trustIssues, isHigherTrim, trimTier, cleanSnapshot } from './govcompare.js';
+import { trustQuestions } from './seller.js';
 import { quickCheck, findComparables, savedComparison, resolveComparison, estimateKey, kmPerYear, KM_PRICE_ADJUST } from './quickcheck.js';
 import { normalizeEstimate, estimatePrompt, ESTIMATE_SCHEMA } from './priceestimate.js';
-import { sellerMissing, sellerTopics, sellerPrompt, normalizeMessage } from './sellermsg.js';
+import { sellerMissing, sellerTopics, sellerPrompt, normalizeMessage, cleanTrust } from './sellermsg.js';
 import { modelKey, normalizeNotes, NOTES_SCHEMA, buildGeminiNotesRequest, buildAnthropicNotesRequest, notesPrompt } from './modelnotes.js';
 import { buildSellerMessage, waNumber, waLink } from './seller.js';
 import { mapGov, mergeGov, mergeFields, stripCountry, normYm } from './govmap.js';
@@ -871,7 +872,7 @@ test('Registry', 'hand count, year, ownership, test month and make mismatches ar
   eq(m.map((x) => [x.key, x.mine, x.gov]), [['make', 'Kia', 'טויוטה'], ['year', 2021, 2022], ['originalOwnership', 'private', 'fleet_lease'], ['handCount', 1, 2], ['testExpiry', '2027-06-01', '2027-03-14']]);
 });
 test('Registry', 'ad km below the last test → odometer mismatch', () => {
-  eq(registryMismatches({ currentKm: 86000 }, GOV), [{ key: 'currentKm', mine: 86000, gov: 90000, odometer: true }]);
+  eq(registryMismatches({ currentKm: 86000 }, GOV), [{ key: 'currentKm', mine: 86000, gov: 90000, odometer: true, suspicious: 'odometer' }]);
   eq(registryMismatches({ currentKm: 90000 }, GOV), []);
 });
 test('Registry', 'a mismatch the user settled ("keep mine") stays settled until the registry value changes', () => {
@@ -881,6 +882,87 @@ test('Registry', 'a mismatch the user settled ("keep mine") stays settled until 
 });
 test('Registry', 'every mismatch has an EN/HE "watch out" line', () => {
   const keys = ['make', 'model', 'year', 'trim', 'originalOwnership', 'handCount', 'testExpiry'].map((k) => `sum.watch.mismatch.${k}`);
+  eq(keys.filter((k) => !STRINGS.en[k] || !STRINGS.he[k]), []);
+});
+
+// ---------------- Seller trust (suspicious registry mismatches) ----------------
+
+const REG = { make: 'טויוטה', model: 'COROLLA', year: 2021, trim: 'ACTIVE', originalOwnership: 'fleet_lease', handCount: 3,
+  testExpiry: '2027-03-14', lastTestKm: 90000 };
+const codes = (car, gov = REG) => trustIssues(car, gov, { models: MODELS }).map((i) => i.code);
+const neutral = (car, gov = REG) => registryMismatches(car, gov, { models: MODELS }).filter((m) => !m.suspicious).map((m) => m.key);
+
+test('Trust', 'fewer hands than registered → suspicious; more hands → neutral', () => {
+  eq(codes({ handCount: 1 }), ['fewerHands']);
+  eq([codes({ handCount: 4 }), neutral({ handCount: 4 })], [[], ['handCount']]);
+});
+test('Trust', '"private" when the registry says lease, fleet, rental or driving school → suspicious', () => {
+  for (const reg of ['fleet_lease', 'private_lease', 'rental', 'driving_school']) {
+    eq(codes({ originalOwnership: 'private' }, { ...REG, originalOwnership: reg }), ['ownership'], reg);
+  }
+  // other ownership differences are neutral, lease kinds are never a mismatch
+  eq([codes({ originalOwnership: 'fleet_lease' }, { ...REG, originalOwnership: 'private' }), neutral({ originalOwnership: 'fleet_lease' }, { ...REG, originalOwnership: 'private' })], [[], ['originalOwnership']]);
+  eq(registryMismatches({ originalOwnership: 'private_lease' }, REG), []);
+});
+test('Trust', 'ad km lower than the last test → suspicious; higher → no mismatch at all', () => {
+  eq(codes({ currentKm: 85000 }), ['odometer']);
+  eq(registryMismatches({ currentKm: 95000 }, REG), []);
+});
+test('Trust', 'newer year than registered → suspicious; older → neutral', () => {
+  eq(codes({ year: 2022 }), ['newerYear']);
+  eq([codes({ year: 2020 }), neutral({ year: 2020 })], [[], ['year']]);
+});
+test('Trust', 'higher trim → suspicious ("Plus" added, or a higher tier word)', () => {
+  eq(codes({ trim: 'Premium' }), ['higherTrim']);
+  eq(codes({ trim: 'Sun Plus' }, { ...REG, trim: 'SUN' }), ['higherTrim']);
+  eq(codes({ trim: 'פרימיום' }), ['higherTrim'], 'Hebrew tier word');
+  eq([trimTier('ACTIVE'), trimTier('Style'), trimTier('Executive'), trimTier('XLE')], [1, 2, 3, null]);
+});
+test('Trust', 'other trim differences are neutral (lower tier, unknown words) or not flagged at all', () => {
+  eq([codes({ trim: 'Base' }, { ...REG, trim: 'PREMIUM' }), neutral({ trim: 'Base' }, { ...REG, trim: 'PREMIUM' })], [[], ['trim']]);
+  eq([codes({ trim: 'XLE' }, { ...REG, trim: 'LE' }), isHigherTrim('XLE', 'LE')], [[], false]);
+  eq(codes({ trim: 'Active' }), [], 'same trim');
+});
+test('Trust', 'test date off by a few weeks → neutral conflict at most, never a trust flag', () => {
+  eq(codes({ testExpiry: '2027-04-02' }), []);
+  eq(neutral({ testExpiry: '2027-04-02' }), ['testExpiry']);
+  eq(registryMismatches({ testExpiry: '2027-03-01' }, REG), [], 'same month');
+});
+test('Trust', 'several at once; "keep mine" removes the flag', () => {
+  const car = { handCount: 1, originalOwnership: 'private', currentKm: 80000, year: 2022, trim: 'Luxury' };
+  eq(codes(car).slice().sort(), ['fewerHands', 'higherTrim', 'newerYear', 'odometer', 'ownership']);
+  eq(trustIssues(car, REG, { models: MODELS, resolved: { handCount: valueKey(3) } }).map((i) => i.code).includes('fewerHands'), false);
+});
+test('Trust', 'quick check: 1 suspicious mismatch → Maybe reason; 2 or more → Skip', () => {
+  const one = [{ code: 'fewerHands' }];
+  const two = [{ code: 'fewerHands' }, { code: 'odometer' }];
+  eq(qk(QC(KNOWN2, { trust: one }).maybe), ['registryMismatch']);
+  eq(QC(KNOWN2, { trust: one }).verdict, 'MAYBE');
+  eq([qk(QC(KNOWN2, { trust: two }).skip), QC(KNOWN2, { trust: two }).verdict], [['registryMismatch'], 'SKIP']);
+  eq(QC(KNOWN2, { trust: [] }).verdict, 'PURSUE');
+});
+test('Trust', 'seller template: one polite question per suspicious mismatch, after the plate', () => {
+  const trust = [{ code: 'fewerHands', ad: 1, gov: 2 }, { code: 'ownership', ad: 'private', gov: 'rental' }, { code: 'odometer', ad: 80000, gov: 90000 }];
+  eq(trustQuestions(trust, 'en'), [
+    'The registry shows 2 owners so far. Can you clarify?',
+    'The registry lists the car as Rental originally. Can you clarify?',
+    'At the last test the car had 90,000 km, more than in the ad. Can you clarify?']);
+  const msg = buildSellerMessage({}, 'he', { trust: trust.slice(0, 1) });
+  eq(msg.indexOf(SELLER.he.plate) < msg.indexOf('ברישום מופיעים 2 בעלים'), true);
+  eq(buildSellerMessage({ plate: '1234567', originalOwnership: 'private', trim: 'x', firstRegistration: '2022-01', testExpiry: '2027-01-01', serviceHistory: 'full', insuranceClaims: 'none' }, 'en', { trust: trust.slice(0, 1) }),
+    `${SELLER.en.opener} The registry shows 2 owners so far. Can you clarify?`);
+  eq(Object.keys(SELLER.he.trust).sort(), Object.keys(SELLER.en.trust).sort());
+});
+test('Trust', 'AI prompt: plate first, then one line per suspicious mismatch; bad items dropped', () => {
+  const p = sellerPrompt({ make: 'Toyota' }, { trust: [{ code: 'fewerHands', ad: 1, gov: 2 }, { code: 'bogus', ad: 1, gov: 2 }] });
+  eq([p.includes('registry shows 2 owners so far, while the ad says hand 1'), p.includes('bogus')], [true, false]);
+  eq(p.indexOf('license plate') < p.indexOf('registry shows 2 owners'), true);
+  eq(cleanTrust([{ code: 'odometer', ad: 1, gov: 'x'.repeat(99) }, { code: 'nope' }, null]), [{ code: 'odometer', ad: '1', gov: 'x'.repeat(40) }]);
+});
+test('Trust', 'registry snapshot keeps known, valid fields only; EN/HE strings exist', () => {
+  eq(cleanSnapshot({ make: 'טויוטה', year: 2021, lastTestKm: '90,000', handCount: 'x', bogus: 1 }), { make: 'טויוטה', year: 2021, lastTestKm: 90000 });
+  const keys = ['trust.banner', 'mm.suspicious', 'qc.maybe.registryMismatch', 'qc.skip.registryMismatch',
+    ...['fewerHands', 'ownership', 'odometer', 'newerYear', 'higherTrim'].map((c) => `trust.${c}`)];
   eq(keys.filter((k) => !STRINGS.en[k] || !STRINGS.he[k]), []);
 });
 

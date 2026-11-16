@@ -3,16 +3,30 @@
 // both halves of a paired template question are missing, the original
 // combined wording is used; otherwise only the missing half is asked.
 
-import { SELLER } from './i18n.js';
+import { SELLER, STRINGS } from './i18n.js';
 
 const missing = (v) => v === null || v === undefined || v === '';
 
+const fmtNum = (n) => new Intl.NumberFormat('en-US').format(n);
+
+/** One polite question per suspicious registry mismatch (govcompare.trustIssues). */
+export function trustQuestions(trust, lang = 'he') {
+  const s = SELLER[lang] || SELLER.he;
+  return (trust || []).filter((i) => s.trust[i.code]).map((i) => {
+    let gov = i.gov;
+    if (i.code === 'ownership') gov = (STRINGS[lang] || STRINGS.he)[`ownershipType.${i.gov}`] || i.gov;
+    if (i.code === 'odometer') gov = fmtNum(i.gov);
+    return s.trust[i.code].replace('{gov}', gov);
+  });
+}
+
 /** Returns the message text, or null if there is nothing to ask. */
-export function buildSellerMessage(car, lang = 'he') {
+export function buildSellerMessage(car, lang = 'he', { trust = [] } = {}) {
   const s = SELLER[lang] || SELLER.he;
   const q = [];
 
   if (missing(car.plate)) q.push(s.plate); // unlocks the gov lookup
+  q.push(...trustQuestions(trust, lang));
   if (missing(car.originalOwnership)) q.push(s.ownership);
   if (missing(car.trim)) q.push(s.trim);
 

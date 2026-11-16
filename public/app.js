@@ -10,7 +10,7 @@ import { summarize } from './summary.js';
 import { formatPlate } from './format.js';
 import { modelKey } from './modelnotes.js';
 import { matchModel } from './modelmatch.js';
-import { registryMismatches, valueKey } from './govcompare.js';
+import { registryMismatches, valueKey, trustIssues } from './govcompare.js';
 import { quickCheck, resolveComparison, estimateKey, QUICK_CHECK_UNTIL, VERDICT_ORDER, VERDICT_TONE } from './quickcheck.js';
 
 // ---------- storage (per-device conveniences only; D1 is the source of truth) ----------
@@ -128,9 +128,10 @@ const ICON = {
   pen: () => svg('0 0 24 24', null, [['path', { d: 'M4 20h4L19 9a2.1 2.1 0 0 0-4-4L4 16z' }], ['path', { d: 'M13.5 6.5l4 4' }]]),
 };
 // The flag icon is a filled pennant: fill it via CSS (.flag svg { fill }).
-function flagIcon() {
+function flagIcon(label) {
   const el = svg('0 0 16 16', null, [['path', { d: 'M3 1.5h1.4v13H3zM4.4 2.2h8.1l-1.9 3.1 1.9 3.1H4.4z' }]]);
-  return h('span.flag', { title: t('flag.title'), role: 'img', 'aria-label': t('flag.title') }, el);
+  const text = label || t('flag.title');
+  return h('span.flag', { title: text, role: 'img', 'aria-label': text }, el);
 }
 
 const fmt = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -224,11 +225,15 @@ const hasFlag = (r) => r.dealBreakers.confirmed.length > 0 || r.warnings.length 
 
 // ---------- quick check (stage 1) ----------
 /** Quick check for a car against the other saved cars and its cached AI estimate. */
-function quickFor(car, { estimate = car.priceEstimate, pending = false } = {}) {
+function quickFor(car, { estimate = car.priceEstimate, pending = false, trust } = {}) {
   const comparison = resolveComparison(car, { others: cars, estimate });
-  const qc = quickCheck(car, { budget: settings.budgetCeiling, comparison: comparison.value ? comparison : null, pending });
-  return { qc, comparison };
+  const tr = trust ?? carTrust(car, car.registry?.fields);
+  const qc = quickCheck(car, { budget: settings.budgetCeiling, comparison: comparison.value ? comparison : null, pending, trust: tr });
+  return { qc, comparison, trust: tr };
 }
+
+/** Suspicious registry mismatches (seller trust) for a car and registry fields. */
+const carTrust = (car, regFields, resolved) => (regFields ? trustIssues(car, regFields, { models, resolved }) : []);
 
 const reasonText = (r, l = lang) => tIn(l, r.key, r.vars);
 const qcLabel = (qc) => t(`qc.verdict.${qc.verdict}`);
@@ -337,14 +342,14 @@ async function renderList() {
   list.replaceChildren(h('div.rows', {}, head, ...shown.map(carRow)));
 }
 
-function carRow({ car, r, v, qc }) {
+function carRow({ car, r, v, qc, trust }) {
   const hl = headline(car, r, v, qc);
   const dash = h('span.muted', {}, '—');
   return h('a.row', { href: `#/edit/${car.id}` },
     h('div.l1', {},
       plateBadge(car.plate),
       h('span.title', {}, h('bdi', { dir: 'auto' }, carTitle(car))),
-      hasFlag(r) ? flagIcon() : h('span.flag-slot', { 'aria-hidden': 'true' }),
+      hasFlag(r) || trust?.length ? flagIcon(trust?.length ? t('trust.banner') : null) : h('span.flag-slot', { 'aria-hidden': 'true' }),
       h('span.verdict-cell', {}, hl.badge, h('span.stage', {}, t(hl.stage === 'quick' ? 'stage.quickShort' : 'stage.fullShort')))),
     h('div.l2', {},
       scoreBar(r, v),
@@ -485,6 +490,7 @@ async function renderForm(id) {
     }
     // Seller message language defaults to Hebrew regardless of the UI language.
     form = { id, draft, sellerLang: 'he', notes: null, seller: { status: 'idle', text: '', version: 0 }, estimate: null, gov: null, govPlate: null, govResolved: {} };
+    if (draft.registry?.fields) form.gov = { status: 'done', fields: draft.registry.fields, stored: true };
     const ek = estimateKey(draft);
     if (draft.priceEstimate && ek && draft.priceEstimate.key === ek) {
       const pe = draft.priceEstimate;
@@ -530,7 +536,7 @@ async function renderForm(id) {
     const plate = cleanValue('plate', draft.plate);
     if (!plate || (!force && plate === form.govPlate)) return;
     form.govPlate = plate;
-    form.gov = { status: 'loading' };
+    form.gov = { status: 'loading', fields: form.gov?.fields || null };
     renderGov();
     const session = form;
     try {
@@ -543,6 +549,8 @@ async function renderForm(id) {
         Object.assign(draft, mergeGov(draft, res.fields).car);
         autoCabin();
         form.gov = { status: 'done', fields: res.fields, hints: res.hints, extra: res.extra, failed: res.failed };
+        // Saved car: keep a snapshot so the list can show seller-trust flags.
+        if (id) api('POST', '/api/registry', { id, fields: res.fields }).catch(() => {});
       }
     } catch {
       if (form !== session) return;
@@ -580,17 +588,26 @@ async function renderForm(id) {
     return displayValue(key, v);
   }
 
+  function trustValue(key, v) {
+    if (key === 'currentKm') return `${fmt.format(v)} ${t('unit.km')}`;
+    return mmValue(key, v);
+  }
+
   function renderMismatches(list) {
-    formEl.querySelectorAll('.mm').forEach((el) => el.replaceChildren());
+    formEl.querySelectorAll('.mm').forEach((el) => { el.replaceChildren(); el.classList.remove('suspicious'); });
     for (const m of list) {
       const slot = formEl.querySelector(`.mm[data-mm="${m.key}"]`);
       if (!slot) continue;
       if (m.odometer) {
-        slot.replaceChildren(h('div.mm-line.bad', {}, ltrNums(t('mm.odometer', { ad: fmt.format(m.mine), gov: fmt.format(m.gov) }))));
+        slot.classList.add('suspicious');
+        slot.replaceChildren(h('span.mm-flag', {}, ICON.alert(), t('mm.suspicious')),
+          h('div.mm-line.bad', {}, ltrNums(t('mm.odometer', { ad: fmt.format(m.mine), gov: fmt.format(m.gov) }))));
         continue;
       }
       const fromAd = draft.fieldSources?.[m.key] === 'screenshot';
+      slot.classList.toggle('suspicious', Boolean(m.suspicious));
       slot.replaceChildren(
+        m.suspicious ? h('span.mm-flag', {}, ICON.alert(), t('mm.suspicious')) : null,
         h('div.mm-line', {},
           h('span', {}, t(fromAd ? 'mm.ad' : 'mm.you'), ': ', h('bdi', { dir: 'auto' }, mmValue(m.key, m.mine))),
           ' · ',
@@ -930,7 +947,7 @@ async function renderForm(id) {
   // ----- seller message: written by the AI, editable; template if the API fails -----
   async function writeMessage() {
     const car = buildCar(draft);
-    const { qc } = currentQuick(car);
+    const { qc, trust } = currentQuick(car);
     const session = form;
     form.seller = { ...form.seller, status: 'loading' };
     renderSeller(car, qc);
@@ -940,11 +957,12 @@ async function renderForm(id) {
     try {
       const res = await api('POST', '/api/seller-message', {
         car, lang: form.sellerLang, reasons: qc.reasons.map((r) => reasonText(r, 'en')),
+        trust: trust.map((i) => ({ code: i.code, ad: i.ad, gov: i.gov })),
       });
       text = res.message;
       status = 'done';
     } catch (e) {
-      text = buildSellerMessage(car, form.sellerLang) || '';
+      text = buildSellerMessage(car, form.sellerLang, { trust }) || '';
       status = 'fallback';
       limit = isAiLimit(e);
     }
@@ -1003,7 +1021,8 @@ async function renderForm(id) {
     const est = form.estimate && form.estimate.key === key ? form.estimate : null;
     const pending = Boolean(est && (est.status === 'scheduled' || est.status === 'loading'));
     // buildCar() strips the id; keep it so the car isn't counted as its own comparable.
-    return { ...quickFor({ ...car, id }, { estimate: est?.status === 'done' ? est : null, pending }), est, key };
+    const trust = carTrust(draft, form.gov?.fields, form.govResolved);
+    return { ...quickFor({ ...car, id }, { estimate: est?.status === 'done' ? est : null, pending, trust }), est, key };
   }
 
   function quickSection(car, qc, comparison, est, asHeadline) {
@@ -1062,8 +1081,9 @@ async function renderForm(id) {
     }
     const { qc, comparison, est } = cq;
     renderSeller(car, qc);
-    const mismatches = form.gov?.status === 'done'
+    const mismatches = form.gov?.fields
       ? registryMismatches(draft, form.gov.fields, { models, resolved: form.govResolved }) : [];
+    const trust = mismatches.filter((m) => m.suspicious);
     renderMismatches(mismatches);
     const quickStage = r.coverage < QUICK_CHECK_UNTIL;
 
@@ -1076,10 +1096,19 @@ async function renderForm(id) {
 
     const sections = [];
 
+    // 0. Seller trust: the ad makes the car look better than the registry.
+    if (trust.length) {
+      sections.push(h('section.panel-sec.trust', { role: 'alert' },
+        h('h3', {}, ICON.alert(), t('trust.banner')),
+        h('ul', {}, trust.map((m) => h('li', {}, h('bdi', { dir: 'auto' },
+          t(`trust.${m.suspicious}`, { ad: trustValue(m.key, m.mine), gov: trustValue(m.key, m.gov) }))))),
+        h('div.trust-hint', {}, t('trust.bannerHint'))));
+    }
+
     // 1. Directions: what was found, what to do. In --bad.
     const dirs = [
       ...r.dealBreakers.confirmed.map((k) => t(`dir.db.${k}`)),
-      ...r.warnings.map((w) => t(`dir.${w}`)),
+      ...r.warnings.filter((w) => !(w === 'odometer_rollback' && trust.some((m) => m.suspicious === 'odometer'))).map((w) => t(`dir.${w}`)),
     ];
     if (dirs.length) {
       sections.push(h('section.panel-sec.directions', { role: 'alert' },
@@ -1198,6 +1227,7 @@ async function renderForm(id) {
         api('POST', '/api/price-estimate', { id: saved.id, make: car.make, model: car.model, trim: car.trim, year: car.year,
           km: car.currentKm, ownership: car.originalOwnership, estimate: { low: form.estimate.low, high: form.estimate.high } }).catch(() => {});
       }
+      if (!id && saved?.id && form.gov?.fields) api('POST', '/api/registry', { id: saved.id, fields: form.gov.fields }).catch(() => {});
       carsLoaded = false; // the list reloads everything
       location.hash = '#/';
     } catch (e) {

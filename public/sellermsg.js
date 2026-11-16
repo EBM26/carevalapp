@@ -5,6 +5,7 @@
 
 import { num } from './scoring.js';
 import { kmPerYear } from './quickcheck.js';
+import { TRUST_CODES } from './govcompare.js';
 
 export const MAX_QUESTIONS = 6;
 const MAX_LEN = 1200;
@@ -51,12 +52,29 @@ const TOPIC_TEXT = {
   whySelling: 'Ask, politely, why they are selling.',
 };
 
+const OWN_EN = { private: 'private', private_lease: 'private lease', fleet_lease: 'lease / fleet', rental: 'rental', driving_school: 'driving school' };
+const TRUST_TEXT = {
+  fewerHands: (i) => `The registry shows ${i.gov} owners so far, while the ad says hand ${i.ad}. Politely ask them to clarify.`,
+  ownership: (i) => `The registry lists the original ownership as ${OWN_EN[i.gov] || i.gov}, while the ad says private. Politely ask them to clarify.`,
+  odometer: (i) => `The last annual test recorded ${i.gov} km, more than the ${i.ad} km in the ad. Politely ask them to clarify.`,
+  newerYear: (i) => `The registry shows model year ${i.gov}, while the ad says ${i.ad}. Politely ask them to confirm.`,
+  higherTrim: (i) => `The registry shows trim "${i.gov}", while the ad says "${i.ad}". Politely ask them to confirm the trim.`,
+};
+
+/** Keep only well-formed trust items: [{ code, ad, gov }] with short values. */
+export function cleanTrust(list) {
+  if (!Array.isArray(list)) return [];
+  return list.filter((i) => i && TRUST_CODES.includes(i.code)).slice(0, 5)
+    .map((i) => ({ code: i.code, ad: String(i.ad ?? '').slice(0, 40), gov: String(i.gov ?? '').slice(0, 40) }));
+}
+
 /**
  * car: sanitized car. reasons: short English phrases from the quick check
  * (context only; never to be quoted to the seller).
  */
-export function sellerPrompt(car, { lang = 'he', reasons = [], asOf } = {}) {
+export function sellerPrompt(car, { lang = 'he', reasons = [], trust = [], asOf } = {}) {
   const missing = sellerMissing(car);
+  const trustLines = cleanTrust(trust).map((i) => `- ${TRUST_TEXT[i.code](i)}`);
   const topics = sellerTopics(car, { asOf });
   const facts = [
     car.make || car.model ? `Car: ${[car.year, car.make, car.model, car.trim].filter(Boolean).join(' ')}` : null,
@@ -67,8 +85,11 @@ export function sellerPrompt(car, { lang = 'he', reasons = [], asOf } = {}) {
   const language = lang === 'en'
     ? 'Write in natural, friendly English.'
     : 'Write in natural, friendly, everyday Israeli Hebrew, the way people actually text on WhatsApp.';
+  // Plate first (if missing), then one polite question per registry mismatch, then the rest.
   const asks = [
-    ...missing.map((m) => `- ${MISSING_TEXT[m]}`),
+    ...missing.filter((m) => m === 'plate').map((m) => `- ${MISSING_TEXT[m]}`),
+    ...trustLines,
+    ...missing.filter((m) => m !== 'plate').map((m) => `- ${MISSING_TEXT[m]}`),
     ...topics.map((t) => `- ${TOPIC_TEXT[t]}`),
   ];
   if (!asks.length) asks.push('- Ask whether the car is still available and when it could be seen.');

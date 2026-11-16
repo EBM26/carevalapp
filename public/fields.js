@@ -161,6 +161,8 @@ export function fromRow(row) {
   car.modelNotes = row.model_notes ? safeJson(row.model_notes, null) : null;
   // Read-only cache written by /api/price-estimate (rough AI price range).
   car.priceEstimate = row.price_estimate ? safeJson(row.price_estimate, null) : null;
+  // Read-only snapshot written by /api/registry (registry data, for seller-trust flags in the list).
+  car.registry = row.registry ? safeJson(row.registry, null) : null;
   return car;
 }
 

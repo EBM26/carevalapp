@@ -486,3 +486,13 @@ input::-webkit-date-and-time-value { text-align: start; }
   .thumb.shimmer::after { background: rgba(246, 247, 249, .55); }
   .spinner { border-color: var(--action); }
 }
+
+/* ---------- seller trust ---------- */
+.panel-sec.trust { background: #FBECEA; border-block-end-color: #EFC2BD; color: var(--bad); gap: 8px; }
+.panel-sec.trust h3 { display: flex; align-items: center; gap: 8px; font-size: var(--fs-2); color: var(--bad); }
+.panel-sec.trust h3 svg { width: 16px; height: 16px; flex: none; fill: currentColor; }
+.panel-sec.trust ul { margin: 0; padding-inline-start: 20px; display: grid; gap: 4px; font-size: var(--fs-2); color: var(--ink); }
+.trust-hint { font-size: var(--fs-1); color: var(--ink); }
+.mm.suspicious { background: #FBECEA; border-color: #EFC2BD; }
+.mm-flag { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--bad); }
+.mm-flag svg { width: 13px; height: 13px; fill: currentColor; }

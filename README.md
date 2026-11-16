@@ -41,6 +41,7 @@ Stack: Cloudflare Pages (static `public/`), Pages Functions (`functions/`), D1. 
 | `functions/api/settings.js` | `GET/PUT /api/settings` (budget ceiling) |
 | `functions/api/price-estimate.js` | `POST /api/price-estimate` (rough AI price range, cached per car) |
 | `functions/api/seller-message.js` | `POST /api/seller-message` (AI-written WhatsApp message; the app falls back to a template) |
+| `functions/api/registry.js` | `POST /api/registry` (stores the registry snapshot for a saved car) |
 | `functions/api/model-notes.js` | `POST /api/model-notes` (known issues for a make/model/year, cached per car) |
 | `functions/_lib/llm.js` | Shared Gemini/Anthropic call used by both LLM endpoints |
 | `schema.sql` | Full D1 schema for a new database. Safe to re-run: every statement uses `IF NOT EXISTS` |
@@ -177,6 +178,7 @@ Existing databases need each file in `migrations/` applied once, in order. New d
 | File | What it does | SQL to paste in the D1 console |
 |---|---|---|
 | `0002_model_notes.sql` | Adds the cache column for "Known issues for this model" | `ALTER TABLE cars ADD COLUMN model_notes TEXT;` |
+| `0004_registry_snapshot.sql` | Stores the last registry lookup per car, so the list can show seller-trust flags | `ALTER TABLE cars ADD COLUMN registry TEXT;` |
 | `0003_quick_check.sql` | Adds the `settings` table (budget ceiling) and the cache column for the AI price estimate | `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT NOT NULL);` then `ALTER TABLE cars ADD COLUMN price_estimate TEXT;` |
 
 If the console answers `duplicate column name`, the migration is already applied. Until a migration is applied the app still works: "Known issues" and the AI price estimate just aren't cached, and the budget ceiling can't be saved.
@@ -196,6 +198,20 @@ The production database is managed through the D1 console. For a new column:
 - **Cabin fit** is set from `public/models.json` as soon as make and model are known (from a screenshot, typing or the registry), tagged "From model list". If you pick it yourself, your choice is never overwritten. Models that aren't in the table stay Unknown.
 - **Registry lookup** runs 600 ms after the plate becomes valid. It fills empty fields silently, and compares make, model, year, trim, original ownership, hand count and test date with what the ad or you entered. Differences show under the field with buttons to choose, and in "Watch out". Hebrew/English names (e.g. סקודה / Skoda) are matched through the model list and a make table; when the app can't tell, it doesn't flag. Ad km below the last-test km stays a red odometer warning.
 - **Loading states:** screenshots show thumbnails with a shimmer while being read; the price estimate, seller message and known issues each show a skeleton with a short label. With "reduce motion" turned on, these show a static "Working…" instead.
+
+## Seller trust
+
+Defined in `public/govcompare.js`. A registry difference is **suspicious** only when the ad makes the car look better than the registry:
+
+- fewer hands than registered
+- "private" when the registry says lease, fleet, rental or driving school
+- ad km lower than the last-test km
+- a newer year than registered
+- a clearly higher trim: the ad adds "Plus" to the registered trim, or uses a higher tier word (e.g. Premium/Luxury/Executive above Comfort/Style above Base/Active, Hebrew included)
+
+Other differences (other trim differences, a test date a few weeks off, more hands than registered, an older year) are normal inline conflicts. Ad km higher than the last-test km is expected and isn't flagged.
+
+With at least one suspicious difference, a red "Ad doesn't match the registry" banner tops the score panel and the car gets a red flag in the list (needs migration `0004`). The quick check adds a Maybe reason for one, and says Skip for two or more. The seller message (AI or template) asks one polite question about each.
 
 ## Quick check rules
 

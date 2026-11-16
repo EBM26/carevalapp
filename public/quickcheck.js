@@ -115,11 +115,12 @@ export function resolveComparison(car, { others = [], estimate = null } = {}) {
  *   budget      budget ceiling in ₪ (or null)
  *   comparison  result of resolveComparison (or null)
  *   pending     true while an AI estimate is being fetched (don't flag "no comparison" yet)
+ *   trust       suspicious registry mismatches (govcompare.trustIssues): 1 → Maybe, 2+ → Skip
  *   asOf        date for car age
  * Returns { verdict, known, knownCount, skip, maybe, good, notes, reasons } where each reason is
  * { key, vars } (i18n keys under qc.skip / qc.maybe / qc.good).
  */
-export function quickCheck(car, { budget = null, comparison = null, pending = false, asOf } = {}) {
+export function quickCheck(car, { budget = null, comparison = null, pending = false, trust = [], asOf } = {}) {
   const skip = [];
   const maybe = [];
   const good = [];
@@ -141,12 +142,14 @@ export function quickCheck(car, { budget = null, comparison = null, pending = fa
   else if (kpy && kpy.low > 28000) skip.push({ key: 'qc.skip.highKmYear' });
   if (car.cabinFit === 'tight') skip.push({ key: 'qc.skip.cabinTight' });
   if (Object.values(db).includes('yes')) skip.push({ key: 'qc.skip.dealBreaker' });
+  if ((trust?.length || 0) >= 2) skip.push({ key: 'qc.skip.registryMismatch' });
 
   // ----- maybe -----
   if (original === 'fleet_lease') maybe.push({ key: 'qc.maybe.fleet' });
   else if (hands === 2 && original === 'private_lease') maybe.push({ key: 'qc.maybe.exLease2nd' });
   if (!(km !== null && km > 130000) && kpy && kpy.low > 22000 && kpy.low <= 28000) maybe.push({ key: 'qc.maybe.kmYear' });
   if (car.cabinFit === 'adequate') maybe.push({ key: 'qc.maybe.cabinAdequate' });
+  if (trust?.length === 1) maybe.push({ key: 'qc.maybe.registryMismatch' });
 
   // ----- price vs comparison -----
   const cmp = comparison && comparison.value ? comparison : null;

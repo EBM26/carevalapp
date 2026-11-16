@@ -8,6 +8,8 @@ import { onRequestPost as extract } from '../functions/api/extract.js';
 import { onRequestPost as priceEstimate } from '../functions/api/price-estimate.js';
 import { onRequestPost as sellerMessage } from '../functions/api/seller-message.js';
 import { onRequestPost as modelNotes } from '../functions/api/model-notes.js';
+import { onRequestPost as registrySnapshot } from '../functions/api/registry.js';
+import { onRequestPost as sellerMessageWithTrust } from '../functions/api/seller-message.js';
 
 // ---------- fetch mock ----------
 let calls = [];
@@ -141,6 +143,28 @@ await test('/api/model-notes: text model; quota → ai_limit', async () => {
   reset(geminiErr(429));
   res = await modelNotes({ request: req({ make: 'Kia', model: 'Niro' }), env: ENV });
   eq([res.status, (await res.json()).error], [429, 'ai_limit']);
+});
+await test('/api/seller-message: suspicious mismatches reach the prompt as polite questions', async () => {
+  reset(geminiOk({ message: 'היי! ברישום מופיעים 2 בעלים, אפשר להבהיר?' }));
+  const res = await sellerMessageWithTrust({ request: req({ car: { make: 'Kia' }, trust: [{ code: 'fewerHands', ad: 1, gov: 2 }, { code: 'evil', ad: 'x', gov: 'y' }] }), env: ENV });
+  const prompt = calls[0].body.contents[0].parts[0].text;
+  eq([res.status, prompt.includes('registry shows 2 owners so far'), prompt.includes('evil')], [200, true, false]);
+});
+// minimal D1 stand-in for the snapshot endpoint
+const fakeDb = (changes, fail = false) => {
+  const writes = [];
+  return { writes, prepare: (sql) => ({ bind: (...args) => ({ run: async () => { if (fail) throw new Error('no such column: registry'); writes.push({ sql, args }); return { meta: { changes } }; } }) }) };
+};
+await test('/api/registry: stores a cleaned snapshot for a saved car', async () => {
+  const DB = fakeDb(1);
+  const res = await registrySnapshot({ request: req({ id: 'abc-123', fields: { handCount: 2, lastTestKm: '90,000', junk: 'x' } }), env: { DB } });
+  const stored = JSON.parse(DB.writes[0].args[0]);
+  eq([res.status, stored.fields, DB.writes[0].args[1]], [200, { handCount: 2, lastTestKm: 90000 }, 'abc-123']);
+});
+await test('/api/registry: missing column → 503; unknown car → 404; bad body → 400', async () => {
+  eq((await registrySnapshot({ request: req({ id: 'abc', fields: {} }), env: { DB: fakeDb(1, true) } })).status, 503);
+  eq((await registrySnapshot({ request: req({ id: 'abc', fields: {} }), env: { DB: fakeDb(0) } })).status, 404);
+  eq((await registrySnapshot({ request: req({ fields: {} }), env: { DB: fakeDb(1) } })).status, 400);
 });
 await test('network guard: an unmocked request fails loudly', async () => {
   let err;
