@@ -4,7 +4,7 @@
 // Provider configuration: see functions/_lib/llm.js.
 import { validateImages, normalizeExtraction, buildGeminiRequest, buildAnthropicRequest } from '../../public/extraction.js';
 import { json, error, readJson } from '../_lib/cars.js';
-import { callLLM, llmConfig, LlmConfigError, llmErrorMessage } from '../_lib/llm.js';
+import { callLLM, llmConfig, LlmConfigError, llmErrorResponse } from '../_lib/llm.js';
 
 export async function onRequestPost({ request, env }) {
   try { llmConfig(env); } catch (e) {
@@ -20,9 +20,9 @@ export async function onRequestPost({ request, env }) {
     const { provider, model, raw } = await callLLM(env, {
       gemini: () => buildGeminiRequest(body.images),
       anthropic: (m) => buildAnthropicRequest(body.images, m),
-    });
+    }, { task: 'vision' });
     return json({ provider, model, fields: normalizeExtraction(raw) });
   } catch (e) {
-    return error(502, llmErrorMessage(e));
+    return llmErrorResponse(e);
   }
 }

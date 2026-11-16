@@ -6,8 +6,12 @@
 APP_PASSWORD=
 SESSION_SECRET=
 
-# Screenshot extraction:
+# AI features (screenshots, price estimate, seller message, known issues):
 GEMINI_API_KEY=
-# To try Anthropic locally, also add:
+# Optional model per task (defaults shown):
+# GEMINI_MODEL_VISION=gemini-3.6-flash
+# GEMINI_MODEL_TEXT=gemini-3.5-flash-lite
+
+# To try Anthropic locally instead:
 # LLM_PROVIDER=anthropic
 # ANTHROPIC_API_KEY=

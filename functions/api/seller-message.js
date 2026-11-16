@@ -6,7 +6,7 @@
 import { sanitizeCar } from '../../public/fields.js';
 import { sellerPrompt, buildGeminiMessageRequest, buildAnthropicMessageRequest, normalizeMessage } from '../../public/sellermsg.js';
 import { json, error, readJson } from '../_lib/cars.js';
-import { callLLM, llmConfig, LlmConfigError, llmErrorMessage } from '../_lib/llm.js';
+import { callLLM, llmConfig, LlmConfigError, llmErrorResponse } from '../_lib/llm.js';
 
 export async function onRequestPost({ request, env }) {
   const body = await readJson(request);
@@ -25,11 +25,11 @@ export async function onRequestPost({ request, env }) {
     const { raw } = await callLLM(env, {
       gemini: () => buildGeminiMessageRequest(prompt),
       anthropic: (m) => buildAnthropicMessageRequest(prompt, m),
-    });
+    }, { task: 'text' });
     const message = normalizeMessage(raw);
     if (!message) return error(502, 'The LLM returned an empty message');
     return json({ message, lang });
   } catch (e) {
-    return error(502, llmErrorMessage(e));
+    return llmErrorResponse(e);
   }
 }

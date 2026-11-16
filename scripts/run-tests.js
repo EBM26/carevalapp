@@ -1,5 +1,8 @@
 // Run the scoring tests in Node: `npm test` or `node scripts/run-tests.js`
-import { runAll } from '../public/tests.js';
+// The browser test suite never needs the network; fail loudly if anything tries.
+globalThis.fetch = async (url) => { throw new Error(`Unexpected network request in tests: ${url}`); };
+
+const { runAll } = await import('../public/tests.js');
 
 const results = await runAll();
 let group = null;

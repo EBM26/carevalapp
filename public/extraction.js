@@ -5,8 +5,11 @@
 import { cleanValue } from './fields.js';
 import { normYm } from './govmap.js';
 
+// Gemini: one model per task, overridable with GEMINI_MODEL_VISION / GEMINI_MODEL_TEXT.
+// Screenshots go to the vision model; everything text-only goes to the cheaper
+// text model (which also accepts images, so it doubles as the vision fallback).
 export const PROVIDERS = {
-  gemini: { defaultModel: 'gemini-3.6-flash' },
+  gemini: { visionModel: 'gemini-3.6-flash', textModel: 'gemini-3.5-flash-lite' },
   anthropic: { defaultModel: 'claude-opus-5-5' },
 };
 

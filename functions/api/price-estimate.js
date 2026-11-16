@@ -12,7 +12,7 @@ import { estimateKey } from '../../public/quickcheck.js';
 import { estimatePrompt, buildGeminiEstimateRequest, buildAnthropicEstimateRequest, normalizeEstimate } from '../../public/priceestimate.js';
 import { ENUMS } from '../../public/scoring.js';
 import { json, error, readJson, ID_RE } from '../_lib/cars.js';
-import { callLLM, llmConfig, LlmConfigError, llmErrorMessage } from '../_lib/llm.js';
+import { callLLM, llmConfig, LlmConfigError, llmErrorResponse } from '../_lib/llm.js';
 
 const parse = (s) => { try { return JSON.parse(s); } catch { return null; } };
 
@@ -55,10 +55,10 @@ export async function onRequestPost({ request, env }) {
       const { raw } = await callLLM(env, {
         gemini: () => buildGeminiEstimateRequest(prompt),
         anthropic: (m) => buildAnthropicEstimateRequest(prompt, m),
-      });
+      }, { task: 'text' });
       range = normalizeEstimate(raw);
     } catch (e) {
-      return error(502, llmErrorMessage(e));
+      return llmErrorResponse(e);
     }
   }
 

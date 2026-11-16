@@ -206,6 +206,9 @@ function verdictBadge(v, short = true) {
   return h(`span.badge.${v.tone}${v.provisional && v.kind !== 'TOO_EARLY' ? '.provisional' : ''}`, { title }, verdictLabel(v, short));
 }
 
+/** The API's quota/overload answer (HTTP 429 { error: 'ai_limit' }). */
+const isAiLimit = (e) => e?.data?.error === 'ai_limit';
+
 const hasFlag = (r) => r.dealBreakers.confirmed.length > 0 || r.warnings.length > 0;
 
 // ---------- quick check (stage 1) ----------
@@ -236,6 +239,7 @@ function comparisonText(car, cmp, est) {
     if (cmp.needsAi && est && est.key === key) {
       if (est.status === 'loading' || est.status === 'scheduled') return { text: t('cmp.loading'), muted: true };
       if (est.status === 'error') return { text: `${t('cmp.aiUnavailable')} ${t('cmp.none')}`, muted: true };
+      if (est.status === 'limit') return { text: t('ai.limit'), muted: true };
       if (est.status === 'unknown') return { text: `${t('cmp.aiUnknown')} ${t('cmp.none')}`, muted: true };
     }
     return { text: t('cmp.none') };
@@ -615,7 +619,7 @@ async function renderForm(id) {
       form.shot = { status: 'done', filled: m.filled, conflicts: m.conflicts, noteUntil: Date.now() + 5000 };
     } catch (err) {
       if (form !== session) return;
-      form.shot = { status: 'error', message: t('shot.error', { msg: err.message }) };
+      form.shot = { status: 'error', message: isAiLimit(err) ? t('ai.limit') : t('shot.error', { msg: err.message }) };
     }
     renderForm(id);
   }
@@ -834,7 +838,7 @@ async function renderForm(id) {
       form.notes = { status: 'done', key, items: res.items };
     } catch (e) {
       if (form !== session) return;
-      form.notes = { status: 'error', key, message: e.message };
+      form.notes = { status: 'error', key, message: e.message, limit: isAiLimit(e) };
     }
     renderPanel();
   }
@@ -861,7 +865,7 @@ async function renderForm(id) {
       form.estimate = { key, status: res.low && res.high ? 'done' : 'unknown', low: res.low, high: res.high };
     } catch (e) {
       if (form !== session || form.estimate?.key !== key) return;
-      form.estimate = { key, status: 'error', message: e.message };
+      form.estimate = { key, status: isAiLimit(e) ? 'limit' : 'error', message: e.message };
     }
     renderPanel();
   }
@@ -875,18 +879,20 @@ async function renderForm(id) {
     renderSeller(car, qc);
     let text;
     let status;
+    let limit = false;
     try {
       const res = await api('POST', '/api/seller-message', {
         car, lang: form.sellerLang, reasons: qc.reasons.map((r) => reasonText(r, 'en')),
       });
       text = res.message;
       status = 'done';
-    } catch {
+    } catch (e) {
       text = buildSellerMessage(car, form.sellerLang) || '';
       status = 'fallback';
+      limit = isAiLimit(e);
     }
     if (form !== session) return;
-    form.seller = { status, text, version: form.seller.version + 1 };
+    form.seller = { status, text, limit, version: form.seller.version + 1 };
     renderSeller(buildCar(draft), qc);
   }
 
@@ -918,7 +924,7 @@ async function renderForm(id) {
       form.seller.text = text.value;
       if (waBtn) waBtn.href = waLink(car.sellerPhone, text.value);
     });
-    if (st.status === 'fallback') kids.push(h('div.note', {}, t('seller.fallback')));
+    if (st.status === 'fallback') kids.push(h('div.note', {}, t(st.limit ? 'seller.fallbackLimit' : 'seller.fallback')));
     kids.push(text, h('div.seller-actions', {},
       h('button.btn.small', { type: 'button', onclick: () => copyText(text.value, text) }, t('seller.copy')),
       waBtn,
@@ -1045,7 +1051,7 @@ async function renderForm(id) {
       issuesCtl = h('div', {},
         h('button.btn.small', { type: 'button', onclick: fetchNotes, disabled: !key, title: key ? null : t('panel.knownIssuesNeedModel') }, t('panel.knownIssues')),
         !key ? h('div.note', {}, t('panel.knownIssuesNeedModel')) : null,
-        notes?.status === 'error' ? h('div.warn-text', {}, t('panel.knownIssuesError', { msg: notes.message })) : null);
+        notes?.status === 'error' ? h('div.warn-text', {}, notes.limit ? t('ai.limit') : t('panel.knownIssuesError', { msg: notes.message })) : null);
     } else if (notes.status === 'loading') {
       issuesCtl = h('div.note', {}, t('panel.knownIssuesLoading'));
     } else if (notes.status === 'done' && !notes.items.length) {

@@ -114,9 +114,12 @@ Pages project → **Settings** → **Variables and Secrets** → **Add**:
 | `SESSION_SECRET` | **Secret** | a random string of **at least 32 characters** (see below) | **yes** |
 | `GEMINI_API_KEY` | **Secret** | your Gemini API key | yes |
 | `LLM_PROVIDER` | Plaintext | `gemini` | optional; `gemini` is the default |
-| `GEMINI_MODEL` | Plaintext | e.g. `gemini-3.6-flash` | optional; the default is `gemini-3.6-flash` |
+| `GEMINI_MODEL_VISION` | Plaintext | e.g. `gemini-3.6-flash` | optional; screenshot reading. Default `gemini-3.6-flash` |
+| `GEMINI_MODEL_TEXT` | Plaintext | e.g. `gemini-3.5-flash-lite` | optional; price estimate, seller message, known issues. Default `gemini-3.5-flash-lite` |
 | `ANTHROPIC_API_KEY` | **Secret** | your Anthropic key | only if `LLM_PROVIDER` = `anthropic` |
 | `ANTHROPIC_MODEL` | Plaintext | e.g. `claude-opus-5-5` | optional |
+
+**Gemini quota.** Screenshots use the vision model; everything else uses the cheaper text model. If the vision model answers 429 (quota) or 503 (overloaded), the screenshot is retried once on the text model, which also reads images. If that fails too, or a text task hits its limit, the app shows "AI limit reached for today. Enter the details manually or try again tomorrow." instead of the raw API error. The seller message then falls back to the standard template. (`GEMINI_MODEL` from older setups still works as an override for the vision model.)
 
 To make a `SESSION_SECRET`, run `openssl rand -base64 32` in a terminal, or use any password manager's generator set to 40+ characters. It is only used to sign the login cookie; you never type it.
 
@@ -157,7 +160,7 @@ cp .dev.vars.example .dev.vars # then set APP_PASSWORD, SESSION_SECRET (required
 npm run dev                    # http://localhost:8788
 ```
 
-Tests: `npm test`, or sign in and open http://localhost:8788/tests.html.
+Tests: `npm test` runs the browser suite in Node, then the server tests (`scripts/server-tests.js`), which call the four AI endpoints against a mocked `fetch`. No test ever reaches the real Gemini or Anthropic API: an unmocked network request fails the run. You can also sign in and open http://localhost:8788/tests.html.
 
 Locally the site runs on plain `http://`, so the session cookie is named `session` and isn't marked `Secure` (browsers won't reliably store `Secure` cookies over http). On Cloudflare (always https) it's `__Host-session` with `Secure`.
 

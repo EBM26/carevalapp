@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node scripts/run-tests.js",
+    "test": "node scripts/run-tests.js && node scripts/server-tests.js",
     "db:local": "wrangler d1 execute DB --local --file=schema.sql -c wrangler.local.toml",
     "dev": "wrangler pages dev public --d1 DB=local-dev --binding LLM_PROVIDER=gemini --compatibility-date=2026-11-01 --port 8788"
   },

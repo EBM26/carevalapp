@@ -10,7 +10,7 @@
 import { cleanValue } from '../../public/fields.js';
 import { modelKey, notesPrompt, buildGeminiNotesRequest, buildAnthropicNotesRequest, normalizeNotes } from '../../public/modelnotes.js';
 import { json, error, readJson, ID_RE } from '../_lib/cars.js';
-import { callLLM, llmConfig, LlmConfigError, llmErrorMessage } from '../_lib/llm.js';
+import { callLLM, llmConfig, LlmConfigError, llmErrorResponse } from '../_lib/llm.js';
 
 function parseCache(s) {
   try { return JSON.parse(s); } catch { return null; }
@@ -54,10 +54,10 @@ export async function onRequestPost({ request, env }) {
       const { raw } = await callLLM(env, {
         gemini: () => buildGeminiNotesRequest(prompt),
         anthropic: (m) => buildAnthropicNotesRequest(prompt, m),
-      });
+      }, { task: 'text' });
       items = normalizeNotes(raw);
     } catch (e) {
-      return error(502, llmErrorMessage(e));
+      return llmErrorResponse(e);
     }
   }
 
