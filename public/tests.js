@@ -5,6 +5,7 @@
 import { scoreCar, band, num, ENUMS, DEAL_BREAKERS, WEIGHTS } from './scoring.js';
 import { FIELDS, sanitizeCar } from './fields.js';
 import { STRINGS, SELLER } from './i18n.js';
+import { configError, passwordMatches, createSession, verifySession, SESSION_SECONDS } from './auth.js';
 import { buildSellerMessage, waNumber, waLink } from './seller.js';
 import { mapGov, mergeGov, mergeFields, stripCountry, normYm } from './govmap.js';
 import { normalizeExtraction, validateImages, buildGeminiRequest, buildAnthropicRequest, parseGeminiResponse, parseAnthropicResponse, EXTRACT_SCHEMA } from './extraction.js';
@@ -492,11 +493,53 @@ test('Extract', 'screenshot values merge like gov: fill empty, conflict otherwis
   eq([filled.includes('model'), car.fieldSources.model, car.make], [true, 'screenshot', 'Toyota']);
 });
 
+// ---------------- Auth (password + signed session) ----------------
+// These tests are async; the runner awaits them.
+
+const ENV = { APP_PASSWORD: 'correct horse battery', SESSION_SECRET: 'x'.repeat(40) };
+const NOW = 1_800_000_000;
+
+test('Auth', 'config: missing or short secrets fail closed', () =>
+  eq([configError({}), configError({ APP_PASSWORD: 'p' }), configError({ APP_PASSWORD: 'p', SESSION_SECRET: 'short' }), configError(ENV)],
+    ['APP_PASSWORD is not set', 'SESSION_SECRET is not set', 'SESSION_SECRET must be at least 32 characters', null]));
+test('Auth', 'password check: right / wrong / empty / prefix', async () =>
+  eq(await Promise.all(['correct horse battery', 'wrong', '', 'correct horse', null].map((p) => passwordMatches(p, ENV))),
+    [true, false, false, false, false]));
+test('Auth', 'session token: contains no password, verifies, valid for 30 days', async () => {
+  const tok = await createSession(ENV, NOW);
+  eq(tok.includes('horse'), false);
+  eq(tok.startsWith(`v1.${NOW + SESSION_SECONDS}.`), true);
+  eq(await verifySession(tok, ENV, NOW + 1), true);
+  eq(await verifySession(tok, ENV, NOW + SESSION_SECONDS - 1), true);
+});
+test('Auth', 'session token: expired → invalid', async () =>
+  eq(await verifySession(await createSession(ENV, NOW), ENV, NOW + SESSION_SECONDS), false));
+test('Auth', 'session token: tampered expiry or signature → invalid', async () => {
+  const tok = await createSession(ENV, NOW);
+  const [v, exp, sig] = tok.split('.');
+  const flipped = sig.slice(0, -2) + (sig.at(-2) === 'A' ? 'B' : 'A') + sig.at(-1);
+  eq(await verifySession(`${v}.${Number(exp) + 86400}.${sig}`, ENV, NOW), false);
+  eq(await verifySession(`${v}.${exp}.${flipped}`, ENV, NOW), false);
+  eq(await verifySession('garbage', ENV, NOW), false);
+  eq(await verifySession(null, ENV, NOW), false);
+});
+test('Auth', 'changing SESSION_SECRET or APP_PASSWORD logs everyone out', async () => {
+  const tok = await createSession(ENV, NOW);
+  eq(await verifySession(tok, { ...ENV, SESSION_SECRET: 'y'.repeat(40) }, NOW), false);
+  eq(await verifySession(tok, { ...ENV, APP_PASSWORD: 'new password' }, NOW), false);
+});
+test('Auth', 'token with an expiry beyond 30 days (forged far future) → invalid', async () => {
+  const later = await createSession(ENV, NOW + 10 * SESSION_SECONDS);
+  eq(await verifySession(later, ENV, NOW), false);
+});
+
 // ---------------- runner ----------------
 
-export function runAll() {
-  return tests.map(({ group, name, fn }) => {
-    try { fn(); return { group, name, pass: true }; }
-    catch (e) { return { group, name, pass: false, error: e.message }; }
-  });
+export async function runAll() {
+  const results = [];
+  for (const { group, name, fn } of tests) {
+    try { await fn(); results.push({ group, name, pass: true }); }
+    catch (e) { results.push({ group, name, pass: false, error: e.message }); }
+  }
+  return results;
 }

@@ -36,6 +36,7 @@ function applyLang() {
   document.title = t('appTitle');
   document.getElementById('brand').textContent = t('appTitle');
   document.getElementById('langToggle').textContent = t('langToggle');
+  document.getElementById('logout').textContent = t('logout');
 }
 
 document.getElementById('langToggle').addEventListener('click', () => {
@@ -86,8 +87,11 @@ async function api(method, path, body) {
     body: body !== undefined ? JSON.stringify(body) : undefined,
     credentials: 'same-origin',
   });
-  // Behind Cloudflare Access an expired session returns a login page, not JSON.
-  if (!(res.headers.get('content-type') || '').includes('application/json')) throw new Error(t('sessionExpired'));
+  // 401 = session cookie expired or was invalidated (password/secret changed).
+  // A non-JSON response is most likely a login page from some proxy in front.
+  if (res.status === 401 || !(res.headers.get('content-type') || '').includes('application/json')) {
+    throw Object.assign(new Error(t('sessionExpired')), { status: res.status });
+  }
   const data = await res.json();
   if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { data, status: res.status });
   return data;

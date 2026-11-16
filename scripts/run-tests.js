@@ -1,7 +1,7 @@
 // Run the scoring tests in Node: `npm test` or `node scripts/run-tests.js`
 import { runAll } from '../public/tests.js';
 
-const results = runAll();
+const results = await runAll();
 let group = null;
 for (const r of results) {
   if (r.group !== group) { group = r.group; console.log(`\n${group}`); }

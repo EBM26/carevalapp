@@ -1,5 +1,12 @@
 # Copy to .dev.vars for local development (`npm run dev`).
-# .dev.vars is git-ignored. Never commit real keys.
+# .dev.vars is git-ignored. Never commit real values.
+
+# Required: site password, and a random signing secret (≥ 32 characters,
+# e.g. `openssl rand -base64 32`). Without both, every page fails closed.
+APP_PASSWORD=
+SESSION_SECRET=
+
+# Screenshot extraction:
 GEMINI_API_KEY=
 # To try Anthropic locally, also add:
 # LLM_PROVIDER=anthropic

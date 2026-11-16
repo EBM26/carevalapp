@@ -2,7 +2,7 @@
 
 A small personal web app for scoring used cars from Israeli listings (Yad2, Facebook, dealers) against a 100-point rubric. Data is entered by hand, read from ad screenshots by an LLM, or fetched from data.gov.il by plate number. Unknown data gives a score **range** rather than a guess.
 
-Stack: Cloudflare Pages (static `public/`), Pages Functions (`functions/`), D1. No frameworks, no build step. Access is protected with Cloudflare Access (email one-time PIN).
+Stack: Cloudflare Pages (static `public/`), Pages Functions (`functions/`), D1. No frameworks, no build step. The whole site is password-protected by `functions/_middleware.js`.
 
 ---
 
@@ -19,6 +19,9 @@ Stack: Cloudflare Pages (static `public/`), Pages Functions (`functions/`), D1. 
 | `public/models.json` | Cabin-fit table (model → easy / adequate / tight). Edit freely |
 | `public/app.js`, `index.html`, `styles.css` | UI |
 | `public/tests.html`, `tests.js` | Test suite (browser), also runnable in Node |
+| `functions/_middleware.js` | Password protection for every page and `/api` route (login page, signed session cookie, logout) |
+| `public/auth.js` | Constant-time password check and session-token signing (WebCrypto) |
+| `public/favicon.svg`, `favicon.ico`, `apple-touch-icon.png` | App icon (browser tab, iOS home screen) |
 | `functions/api/cars/` | `GET/POST /api/cars`, `PUT/DELETE /api/cars/:id` |
 | `functions/api/gov.js` | `GET /api/gov?plate=…` (server-side data.gov.il lookup) |
 | `functions/api/extract.js` | `POST /api/extract` (screenshots → fields) |
@@ -67,7 +70,7 @@ Re-running `schema.sql` is harmless; it won't touch existing data.
 
 **Save and Deploy.** The `functions/` folder is detected automatically and becomes the `/api/*` routes.
 
-The first deploy loads, but the API returns errors until steps 3–4 are done.
+Until steps 3–4 are done, the first deploy shows "Login isn't configured yet". That's expected: the site fails closed without its secrets.
 
 ### 3. Bind the database
 
@@ -86,35 +89,33 @@ Pages project → **Settings** → **Variables and Secrets** → **Add**:
 
 | Name | Type | Value | Required |
 |---|---|---|---|
+| `APP_PASSWORD` | **Secret** | the password you'll type to sign in | **yes** |
+| `SESSION_SECRET` | **Secret** | a random string of **at least 32 characters** (see below) | **yes** |
 | `GEMINI_API_KEY` | **Secret** | your Gemini API key | yes |
 | `LLM_PROVIDER` | Plaintext | `gemini` | optional; `gemini` is the default |
 | `GEMINI_MODEL` | Plaintext | e.g. `gemini-3.6-flash` | optional; the default is `gemini-3.6-flash` |
 | `ANTHROPIC_API_KEY` | **Secret** | your Anthropic key | only if `LLM_PROVIDER` = `anthropic` |
 | `ANTHROPIC_MODEL` | Plaintext | e.g. `claude-opus-5-5` | optional |
 
+To make a `SESSION_SECRET`, run `openssl rand -base64 32` in a terminal, or use any password manager's generator set to 40+ characters. It is only used to sign the login cookie; you never type it.
+
+Without both `APP_PASSWORD` and `SESSION_SECRET` the site **fails closed**: every page shows "Login isn't configured yet" and the API returns 503.
+
 Optionally, under **Settings** → **Runtime**, set **Compatibility date** to `2026-11-01`, the date the code was tested with.
 
 **Bindings, variables and secrets only apply to deployments made after you save them.** Redeploy once: **Deployments** → latest → **⋯** → **Retry deployment**, or push any commit.
 
-### 5. Lock the site with Cloudflare Access (email one-time PIN)
+### 5. How the password protection works
 
-Until this step is done, **anyone with the URL can use the app, read your cars, and spend your API key.** Do it right after the first deploy.
+There is nothing extra to set up in Cloudflare: the `APP_PASSWORD` and `SESSION_SECRET` secrets from step 4 are all it needs. Preview deployments are protected the same way, as long as the secrets are also set for **Preview**.
 
-**a. Set up Zero Trust** (first time only): dashboard → **Zero Trust**. Choose a team name and the **Free** plan. It may ask for a payment method even for the free plan.
+- **Every page, file and `/api` route** requires a session. The only exceptions are the three icon files, so the login page can show its tab icon. Without a session, pages show a sign-in screen (English/Hebrew, following the app's language toggle) and `/api/*` returns `401 {"error":"unauthorized"}`.
+- **Signing in** sets a cookie named `__Host-session`, valid for **30 days**, with `Secure`, `HttpOnly`, `SameSite=Lax` and `Path=/`. The cookie holds only an expiry time and an HMAC signature made with `SESSION_SECRET`; the password is never stored in it.
+- **The password check is constant-time**, and wrong attempts are delayed by about 0.6 s. There is no lockout (that would need shared storage), so **use a long password**, e.g. four or more random words.
+- **Log out** is in the header and clears the cookie.
+- **To log out every device**, change `SESSION_SECRET` or `APP_PASSWORD` and redeploy. Existing cookies stop being valid immediately.
 
-**b. Enable One-time PIN login.** It is no longer on by default. Go to **Zero Trust** → **Integrations** → **Identity providers** → **Add new identity provider** → **One-time PIN**.
-
-**c. Protect the preview deployments.** Go to **Workers & Pages** → `used-car-scorer` → **Settings** → **General** → **Access policy** → **Enable access policy**.
-
-**d. Extend it to the production URL.** The switch in (c) covers only `*.used-car-scorer.pages.dev`. To also cover `used-car-scorer.pages.dev`:
-1. Next to the access policy you just enabled, select **Manage**. This opens the Access application in Zero Trust.
-2. On that application, under **Public hostname**, clear the `*` from the **Subdomain** field and **Save**. The application now protects the production URL.
-3. Go back to the Pages project → **Settings** → **General** and **Enable access policy** again. This creates a second application for the previews.
-4. In **Zero Trust** → **Access controls** → **Applications** you should now see two applications: one for `used-car-scorer.pages.dev` and one for `*.used-car-scorer.pages.dev`.
-
-**e. Restrict both to your email.** For **each** of the two applications, open **Policies**. Make the Allow policy's **Include** rule **Emails** → your address, and remove anything broader (such as everyone or all account members). Under **Login methods**, make sure **One-time PIN** is enabled.
-
-**f. Check it.** Open `https://used-car-scorer.pages.dev` in a private window. You should get the Cloudflare Access page asking for your email, and the PIN arrives by email. Then open `https://used-car-scorer.pages.dev/api/cars` in another private window; it should also show the Access login, not JSON.
+**Check it:** open `https://used-car-scorer.pages.dev` in a private window. You should see the sign-in page. In another private window, `https://used-car-scorer.pages.dev/api/cars` should return `{"error":"unauthorized"}`.
 
 ### 6. Smoke test
 
@@ -131,11 +132,13 @@ Requires Node 20+. Local dev uses a local D1 database on your machine and never 
 ```sh
 npm install
 npm run db:local               # applies schema.sql to the local database
-cp .dev.vars.example .dev.vars # then add your GEMINI_API_KEY (only needed for screenshots)
+cp .dev.vars.example .dev.vars # then set APP_PASSWORD, SESSION_SECRET (required) and GEMINI_API_KEY (screenshots only)
 npm run dev                    # http://localhost:8788
 ```
 
-Tests: `npm test`, or open http://localhost:8788/tests.html.
+Tests: `npm test`, or sign in and open http://localhost:8788/tests.html.
+
+Locally the site runs on plain `http://`, so the session cookie is named `session` and isn't marked `Secure` (browsers won't reliably store `Secure` cookies over http). On Cloudflare (always https) it's `__Host-session` with `Secure`.
 
 ---
 

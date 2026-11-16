@@ -4,6 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Scoring Tests</title>
+  <link rel="icon" href="/favicon.ico" sizes="32x32">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <style>
     body { font: 14px/1.4 system-ui, sans-serif; background: #fff; color: #111; margin: 0; padding: 16px; }
     h1 { font-size: 18px; margin: 0 0 8px; }
@@ -22,7 +25,7 @@
   <div id="out"></div>
   <script type="module">
     import { runAll } from './tests.js';
-    const results = runAll();
+    const results = await runAll();
     const out = document.getElementById('out');
     let group = null;
     for (const r of results) {
