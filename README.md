@@ -11,6 +11,10 @@ Stack: Cloudflare Pages (static `public/`), Pages Functions (`functions/`), D1. 
 | Path | What it is |
 |---|---|
 | `public/scoring.js` | The rubric. Pure functions, shared by the browser and Functions |
+| `public/verdict.js` | What the UI shows for a score: Avoid / Too early to tell / OK / Strong buy |
+| `public/summary.js` | Rules for the "Good signs" / "Watch out" lists |
+| `public/modelnotes.js` | Prompt and schema for "Known issues for this model" |
+| `public/format.js` | Plate formatting (`12-345-67`, `123-45-678`) |
 | `public/fields.js` | Car record definition: validation and the D1 column mapping |
 | `public/govmap.js` | data.gov.il records → car fields, plus the gov/screenshot merge rule |
 | `public/extraction.js` | LLM prompt, JSON schema, request builders and parsers |
@@ -25,7 +29,10 @@ Stack: Cloudflare Pages (static `public/`), Pages Functions (`functions/`), D1. 
 | `functions/api/cars/` | `GET/POST /api/cars`, `PUT/DELETE /api/cars/:id` |
 | `functions/api/gov.js` | `GET /api/gov?plate=…` (server-side data.gov.il lookup) |
 | `functions/api/extract.js` | `POST /api/extract` (screenshots → fields) |
-| `schema.sql` | D1 schema. Safe to re-run: every statement uses `IF NOT EXISTS` |
+| `functions/api/model-notes.js` | `POST /api/model-notes` (known issues for a make/model/year, cached per car) |
+| `functions/_lib/llm.js` | Shared Gemini/Anthropic call used by both LLM endpoints |
+| `schema.sql` | Full D1 schema for a new database. Safe to re-run: every statement uses `IF NOT EXISTS` |
+| `migrations/` | Changes for an existing database, applied in order (see "Database migrations") |
 | `wrangler.local.toml` | **Local dev only.** Cloudflare ignores it; production settings live in the dashboard |
 
 There is deliberately no `wrangler.toml`. If one existed, Cloudflare Pages would treat it as the source of truth and lock the bindings and variables you set in the dashboard.
@@ -53,6 +60,8 @@ Everything below happens in the Cloudflare dashboard. No Wrangler commands are n
    You should see 3 rows: `table cars`, `index idx_cars_status`, `index idx_cars_score_max`.
 
 Re-running `schema.sql` is harmless; it won't touch existing data.
+
+**Already created the database before November 2026?** Also run the migrations below.
 
 ### 2. Create the Pages project from GitHub
 
@@ -145,6 +154,18 @@ Locally the site runs on plain `http://`, so the session cookie is named `sessio
 ## Backups
 
 The **Export JSON** button on the car list downloads every car. **Import JSON** restores a file; cars with the same ID are overwritten, so importing the same backup twice is safe.
+
+## Database migrations
+
+Existing databases need each file in `migrations/` applied once, in order. New databases created from the current `schema.sql` already include them.
+
+| File | What it does | SQL to paste in the D1 console |
+|---|---|---|
+| `0002_model_notes.sql` | Adds the cache column for "Known issues for this model" | `ALTER TABLE cars ADD COLUMN model_notes TEXT;` |
+
+If the console answers `duplicate column name`, the migration is already applied. Until it's applied, "Known issues" still works but isn't cached, so it calls the LLM every time.
+
+Locally: `npx wrangler d1 execute DB --local -c wrangler.local.toml --file=migrations/0002_model_notes.sql`.
 
 ## Changing the schema later
 

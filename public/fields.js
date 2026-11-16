@@ -157,6 +157,8 @@ export function fromRow(row) {
   car.scoreMax = row.score_max;
   car.rating = row.rating;
   car.coverage = row.coverage;
+  // Read-only cache written by /api/model-notes; not part of FIELDS, so saving a car never overwrites it.
+  car.modelNotes = row.model_notes ? safeJson(row.model_notes, null) : null;
   return car;
 }
 

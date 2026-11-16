@@ -69,39 +69,57 @@ function loginPage({ lang, next, errorKey, status }) {
 <link rel="icon" href="/favicon.ico" sizes="32x32">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Hebrew:wght@400;500;600&display=swap">
 <style>
-  :root { --bg:#fff; --fg:#16181d; --muted:#5f6672; --line:#e3e6ea; --accent:#1f5fd6; --red:#c4262e; color-scheme: light; }
+  :root { --ink:#1C2228; --steel:#6B7480; --line:#E3E6EA; --surface:#F6F7F9; --plate:#FFCB05; --action:#1F4E8C; --bad:#C8372D;
+    --font:"IBM Plex Sans","IBM Plex Sans Hebrew",system-ui,-apple-system,Arial,sans-serif; color-scheme: light; }
+  :root:lang(he) { --font:"IBM Plex Sans Hebrew","IBM Plex Sans",system-ui,-apple-system,Arial,sans-serif; }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--fg);
-    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans Hebrew", sans-serif; }
-  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    padding: 10px 16px; padding-block-start: max(10px, env(safe-area-inset-top)); border-block-end: 1px solid var(--line); }
-  .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 18px; }
-  .brand img { width: 24px; height: 24px; }
-  .ghost { appearance: none; border: 0; background: none; color: var(--accent); font: inherit; font-size: 15px; cursor: pointer; padding: 9px 4px; }
-  main { max-width: 360px; margin: 12vh auto 0; padding: 0 16px; }
-  h1 { font-size: 22px; margin: 0 0 16px; }
-  label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
-  input { font: inherit; font-size: 16px; width: 100%; min-height: 46px; padding: 8px 12px;
-    border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
-  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
-  button[type=submit] { margin-top: 14px; width: 100%; min-height: 46px; border: 0; border-radius: 10px;
-    background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
-  .error { color: var(--red); font-size: 14px; margin: 0 0 12px; }
+  body { margin: 0; min-height: 100vh; background: #fff; color: var(--ink); font-family: var(--font); font-size: 15px; line-height: 1.45;
+    font-variant-numeric: tabular-nums; display: grid; grid-template-rows: auto 1fr; }
+  :focus { outline: none; }
+  :focus-visible { outline: 2px solid var(--action); outline-offset: 2px; }
+  .top { display: flex; justify-content: flex-end; padding: 12px 16px; padding-block-start: max(12px, env(safe-area-inset-top)); }
+  .link { appearance: none; border: 0; background: none; color: var(--action); font: inherit; font-weight: 500; cursor: pointer;
+    min-height: 44px; padding: 0 10px; border-radius: 8px; }
+  .link:hover { background: var(--surface); }
+  main { width: 100%; max-width: 340px; margin: 0 auto; padding: 8vh 16px 48px; display: grid; justify-items: center; align-content: start; gap: 28px; }
+  .plate { display: inline-flex; align-items: stretch; height: 52px; border: 2px solid #1C2228; border-radius: 6px; overflow: hidden;
+    background: var(--plate); color: #111; direction: ltr; }
+  .plate-il { width: 26px; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 5px;
+    background: var(--action); color: #fff; font-size: 12px; font-weight: 600; }
+  .plate-num { display: flex; align-items: center; padding: 0 16px; font-size: 26px; font-weight: 600; letter-spacing: .06em; white-space: nowrap; }
+  h1 { margin: 0; font-size: 22px; font-weight: 600; text-align: center; }
+  .brand { display: grid; justify-items: center; gap: 14px; }
+  form { width: 100%; display: grid; align-content: start; gap: 16px; }
+  label { display: grid; gap: 6px; font-size: 13px; color: var(--steel); }
+  input { font: inherit; font-size: 16px; width: 100%; min-height: 44px; padding: 0 12px; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 8px; background: var(--surface); transition: border-color 120ms; }
+  input:hover { border-color: #CDD2D8; }
+  input:focus { outline: 2px solid var(--action); outline-offset: -1px; border-color: var(--action); background: #fff; }
+  input[aria-invalid=true] { border-color: var(--bad); }
+  .error { color: var(--bad); font-size: 13px; margin: 0; }
+  button[type=submit] { min-height: 44px; border: 1px solid var(--action); border-radius: 8px; background: var(--action); color: #fff;
+    font: inherit; font-weight: 500; cursor: pointer; transition: background-color 120ms; }
+  button[type=submit]:hover { background: #1A4379; }
 </style>
 </head>
 <body>
-<header class="topbar">
-  <span class="brand"><img src="/favicon.svg" alt=""><span data-k="appTitle">${esc(s.appTitle)}</span></span>
-  <button type="button" class="ghost" id="langToggle" data-k="langToggle">${esc(s.langToggle)}</button>
-</header>
+<div class="top">
+  <button type="button" class="link" id="langToggle" data-k="langToggle">${esc(s.langToggle)}</button>
+</div>
 <main>
-  <h1 data-k="login.title">${esc(s['login.title'])}</h1>
-  ${errorKey ? `<p class="error" role="alert" data-k="${errorKey}">${esc(s[errorKey])}</p>` : ''}
+  <div class="brand">
+    <span class="plate" aria-hidden="true"><span class="plate-il">IL</span><span class="plate-num">CAR-SCORE</span></span>
+    <h1 data-k="appTitle">${esc(s.appTitle)}</h1>
+  </div>
   <form method="post" action="/auth/login">
     <input type="hidden" name="next" value="${esc(next)}">
     <label><span data-k="login.password">${esc(s['login.password'])}</span>
-      <input type="password" name="password" autocomplete="current-password" required autofocus>
+      <input type="password" name="password" autocomplete="current-password" required autofocus${errorKey ? ' aria-invalid="true" aria-describedby="err"' : ''}>
+      ${errorKey ? `<span class="error" id="err" role="alert" data-k="${errorKey}">${esc(s[errorKey])}</span>` : ''}
     </label>
     <button type="submit" data-k="login.submit">${esc(s['login.submit'])}</button>
   </form>

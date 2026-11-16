@@ -6,6 +6,10 @@ import { scoreCar, band, num, ENUMS, DEAL_BREAKERS, WEIGHTS } from './scoring.js
 import { FIELDS, sanitizeCar } from './fields.js';
 import { STRINGS, SELLER } from './i18n.js';
 import { configError, passwordMatches, createSession, verifySession, SESSION_SECONDS } from './auth.js';
+import { verdict, knownPoints } from './verdict.js';
+import { summarize } from './summary.js';
+import { formatPlate } from './format.js';
+import { modelKey, normalizeNotes, NOTES_SCHEMA, buildGeminiNotesRequest, buildAnthropicNotesRequest, notesPrompt } from './modelnotes.js';
 import { buildSellerMessage, waNumber, waLink } from './seller.js';
 import { mapGov, mergeGov, mergeFields, stripCountry, normYm } from './govmap.js';
 import { normalizeExtraction, validateImages, buildGeminiRequest, buildAnthropicRequest, parseGeminiResponse, parseAnthropicResponse, EXTRACT_SCHEMA } from './extraction.js';
@@ -531,6 +535,103 @@ test('Auth', 'changing SESSION_SECRET or APP_PASSWORD logs everyone out', async 
 test('Auth', 'token with an expiry beyond 30 days (forged far future) → invalid', async () => {
   const later = await createSession(ENV, NOW + 10 * SESSION_SECONDS);
   eq(await verifySession(later, ENV, NOW), false);
+});
+
+// ---------------- Verdict (presentation of the score) ----------------
+
+const COROLLA = { make: 'Toyota', model: 'Corolla', year: 2022, firstRegistration: '2022-01', currentKm: 86000,
+  originalOwnership: 'private_lease', handCount: 1, cabinFit: 'easy' };
+
+test('Verdict', 'Corolla example (41% known) → too early, 31 of 41 points so far', () => {
+  const v = verdict(S(COROLLA));
+  // known parts: mileage 14/20 + ownership 11/15 + cabin 6/6 = 31 of 41
+  eq([v.kind, v.known], ['TOO_EARLY', { x: 31, y: 41 }]);
+});
+test('Verdict', 'fully unknown car → too early, 0 of 0', () => eq([verdict(S({})).kind, verdict(S({})).known], ['TOO_EARLY', { x: 0, y: 0 }]));
+test('Verdict', 'confirmed deal-breaker → avoid even at 100 and even when coverage is low', () => {
+  eq(verdict(S({ ...PERFECT, dealBreakers: { ...PERFECT.dealBreakers, lien: 'yes' } })).kind, 'AVOID');
+  eq(verdict(S({ dealBreakers: { lien: 'yes' } })).kind, 'AVOID');
+});
+test('Verdict', 'best case under 60 → avoid', () => {
+  // claims major (0), price way above (0), worn tires, tight cabin, ex-rental → max well below 60
+  const r = S({ insuranceClaims: 'major', askingPrice: 200000, benchmarkPrice: 100000, cabinFit: 'tight', tires: 'worn',
+    originalOwnership: 'rental', handCount: 1, firstRegistration: '2025-11', currentKm: 40000 });
+  eq(r.scoreMax < 60, true);
+  eq([verdict(r).kind, verdict(r).reason], ['AVOID', 'lowMax']);
+});
+test('Verdict', '≥50% known, min under 60 but max ≥ 60 → OK (not avoid), possibly strong buy', () => {
+  // history unknown (0–30); price +8% (8 pts) → min 53, max 83, 70% known
+  const r = S({ ...PERFECT, insuranceClaims: null, serviceHistory: null, askingPrice: 108000 });
+  eq([r.coverage, r.scoreMin, r.scoreMax], [70, 53, 83]);
+  const v = verdict(r);
+  eq([v.kind, v.provisional, v.upTo, v.barTone], ['OK', true, 'STRONG_BUY', 'good']);
+});
+test('Verdict', 'perfect car → strong buy, confirmed', () => {
+  const v = verdict(S(PERFECT));
+  eq([v.kind, v.provisional, v.upTo, v.tone], ['STRONG_BUY', false, null, 'good']);
+});
+test('Verdict', 'knownPoints counts parts that are settled even with inputs missing', () =>
+  eq(knownPoints(S({ insuranceClaims: 'major' })), { x: 0, y: 30 }));
+
+// ---------------- Summary (good signs / watch out) ----------------
+
+const sum = (car) => summarize(car, S(car), { asOf: AS_OF });
+const keys = (list) => list.map((i) => i.key.split('.').pop());
+
+test('Summary', 'good signs: 1st hand private, below benchmark, low km', () => {
+  const s = sum({ ...PERFECT });
+  eq(keys(s.good), ['firstHandPrivate', 'belowBenchmark', 'lowKm']);
+  eq([s.good[1].vars.n, s.good[2].vars.km], [10, 10000]);
+  eq(s.watch, []);
+});
+test('Summary', 'at most 3 items each, in priority order', () => {
+  const s = sum({ ...PERFECT, cabinFit: 'easy', tires: 'good' });
+  eq(s.good.length, 3);
+  const w = sum({ currentKm: 140000, lastTestKm: 150000, govStructuralChange: true, insuranceClaims: 'major', tires: 'worn', cabinFit: 'tight' }).watch;
+  eq(keys(w), ['odometer', 'structural', 'claimsMajor']);
+});
+test('Summary', 'ex-rental beats ex-fleet; fleet shown when no rental', () => {
+  eq(keys(sum({ originalOwnership: 'fleet_lease', handCount: 2, ownershipHistory: [{ type: 'fleet_lease' }, { type: 'rental' }] }).watch), ['exRental']);
+  eq(keys(sum({ originalOwnership: 'fleet_lease', handCount: 1 }).watch), ['exFleet']);
+});
+test('Summary', 'price above benchmark, high km/year, test soon, expired test', () => {
+  eq(keys(sum({ askingPrice: 112000, benchmarkPrice: 100000 }).watch), ['aboveBenchmark']);
+  eq(sum({ askingPrice: 112000, benchmarkPrice: 100000 }).watch[0].vars.n, 12);
+  eq(keys(sum({ firstRegistration: '2025-11', currentKm: 30000 }).watch), ['highKm']);
+  eq(keys(sum({ testExpiry: '2027-01-10' }).watch), ['testSoon']);
+  eq(keys(sum({ testExpiry: '2026-10-01' }).watch), ['testExpired']);
+});
+test('Summary', 'worn tires, tight cabin, many hands, service gaps', () => {
+  eq(keys(sum({ tires: 'worn', cabinFit: 'tight' }).watch), ['wornTires', 'cabinTight']);
+  eq(keys(sum({ handCount: 4, serviceHistory: 'none' }).watch), ['manyHands', 'serviceGaps']);
+});
+test('Summary', 'empty car → both lists empty', () => eq(sum({}), { good: [], watch: [] }));
+test('Summary', 'every summary key has EN and HE strings', () => {
+  const all = ['firstHandPrivate', 'belowBenchmark', 'lowKm', 'cleanHistory', 'cabinEasy', 'tiresGood'].map((k) => `sum.good.${k}`)
+    .concat(['odometer', 'structural', 'claimsMajor', 'claimsModerate', 'exRental', 'exFleet', 'aboveBenchmark', 'highTotalKm',
+      'highKm', 'testExpired', 'testSoon', 'manyHands', 'wornTires', 'cabinTight', 'serviceGaps'].map((k) => `sum.watch.${k}`));
+  eq(all.filter((k) => !STRINGS.en[k] || !STRINGS.he[k]), []);
+});
+
+// ---------------- Plate format & model notes ----------------
+
+test('Format', 'plate: 7 digits → 12-345-67, 8 digits → 123-45-678', () =>
+  eq([formatPlate('1234567'), formatPlate('12345678'), formatPlate('36-181-801'), formatPlate(''), formatPlate(null)],
+    ['12-345-67', '123-45-678', '361-81-801', '', '']));
+test('Model notes', 'cache key normalises case/space; needs make and model', () => {
+  eq(modelKey({ make: ' Toyota ', model: 'Corolla  Cross', year: 2022 }), 'toyota|corolla cross|2022');
+  eq(modelKey({ make: 'Toyota', model: 'Corolla', year: '2022' }), modelKey({ make: 'toyota', model: 'COROLLA', year: 2022 }));
+  eq([modelKey({ make: 'Toyota' }), modelKey({ make: 'Kia', model: 'Niro' })], [null, 'kia|niro|']);
+});
+test('Model notes', 'output cleaned: max 3, both languages required, trimmed', () =>
+  eq(normalizeNotes({ items: [{ en: ' CVT judder ', he: 'רעידות בגיר' }, { en: 'x', he: '' }, { en: 'a', he: 'א' }, { en: 'b', he: 'ב' }, { en: 'c', he: 'ג' }] }),
+    [{ en: 'CVT judder', he: 'רעידות בגיר' }, { en: 'a', he: 'א' }, { en: 'b', he: 'ב' }]));
+test('Model notes', 'garbage output → empty list', () => eq([normalizeNotes(null), normalizeNotes({ items: 'no' })], [[], []]));
+test('Model notes', 'requests use the schema (max 3 items) and name the car', () => {
+  const p = notesPrompt({ make: 'Kia', model: 'Niro', year: 2020 });
+  eq([p.includes('2020 Kia Niro'), NOTES_SCHEMA.properties.items.maxItems], [true, 3]);
+  eq(buildGeminiNotesRequest(p).generationConfig.responseJsonSchema === NOTES_SCHEMA, true);
+  eq(buildAnthropicNotesRequest(p, 'm').tool_choice, { type: 'tool', name: 'record_issues' });
 });
 
 // ---------------- runner ----------------
