@@ -5,7 +5,9 @@
 //
 // Unknown fields never count against the car.
 
-import { num, ageMonthsRange, resolveBenchmark } from './scoring.js';
+import { num, ageMonthsRange, resolveBenchmark, kmPerYear, carKm } from './scoring.js';
+
+export { kmPerYear }; // the shared calculation lives in scoring.js
 
 export const QUICK_CHECK_UNTIL = 50;   // coverage % below which the quick check is the headline
 export const MIN_COMPARABLES = 3;      // saved cars needed for a "your saved cars" comparison
@@ -38,17 +40,6 @@ function handCount(car) {
 function refOf(asOf) {
   const d = asOf instanceof Date ? asOf : new Date(asOf ?? Date.now());
   return { y: d.getUTCFullYear(), m: d.getUTCMonth() + 1 };
-}
-
-/**
- * km per year as a range [best case, worst case] (rounded to whole km), or
- * null. A range happens when only the model year is known.
- */
-export function kmPerYear(car, asOf) {
-  const km = num(car.currentKm) ?? num(car.lastTestKm);
-  const age = ageMonthsRange(car, refOf(asOf));
-  if (km === null || !age) return null;
-  return { low: Math.round((km * 12) / age.max), high: Math.round((km * 12) / age.min) };
 }
 
 // ---------- price comparison ----------
@@ -129,8 +120,8 @@ export function quickCheck(car, { budget = null, comparison = null, pending = fa
   const { original, all } = ownerTypes(car);
   const hands = handCount(car);
   const age = ageMonthsRange(car, refOf(asOf));
-  const km = num(car.currentKm) ?? num(car.lastTestKm);
-  const kpy = kmPerYear(car, asOf);
+  const km = carKm(car); // higher of ad km and last-test km
+  const kpy = kmPerYear(car, asOf)?.value ?? null;
   const db = car.dealBreakers || {};
 
   // ----- skip -----
@@ -139,16 +130,14 @@ export function quickCheck(car, { budget = null, comparison = null, pending = fa
   if (all.some((t) => t === 'rental' || t === 'driving_school')) skip.push({ key: 'qc.skip.rental' });
   if (hands !== null && hands >= 3 && age && age.max < 60) skip.push({ key: 'qc.skip.manyHandsYoung' });
   if (km !== null && km > 130000) skip.push({ key: 'qc.skip.highTotalKm' });
-  else if (kpy && kpy.low > 28000) skip.push({ key: 'qc.skip.highKmYear' });
-  if (car.cabinFit === 'tight') skip.push({ key: 'qc.skip.cabinTight' });
+  else if (kpy !== null && kpy > 28000) skip.push({ key: 'qc.skip.highKmYear' });
   if (Object.values(db).includes('yes')) skip.push({ key: 'qc.skip.dealBreaker' });
   if ((trust?.length || 0) >= 2) skip.push({ key: 'qc.skip.registryMismatch' });
 
   // ----- maybe -----
   if (original === 'fleet_lease') maybe.push({ key: 'qc.maybe.fleet' });
   else if (hands === 2 && original === 'private_lease') maybe.push({ key: 'qc.maybe.exLease2nd' });
-  if (!(km !== null && km > 130000) && kpy && kpy.low > 22000 && kpy.low <= 28000) maybe.push({ key: 'qc.maybe.kmYear' });
-  if (car.cabinFit === 'adequate') maybe.push({ key: 'qc.maybe.cabinAdequate' });
+  if (!(km !== null && km > 130000) && kpy !== null && kpy > 22000 && kpy <= 28000) maybe.push({ key: 'qc.maybe.kmYear' });
   if (trust?.length === 1) maybe.push({ key: 'qc.maybe.registryMismatch' });
 
   // ----- price vs comparison -----
@@ -165,8 +154,7 @@ export function quickCheck(car, { budget = null, comparison = null, pending = fa
 
   // ----- good signs (don't change the verdict) -----
   if (hands === 1 && original === 'private') good.push({ key: 'qc.good.firstHandPrivate' });
-  if (kpy && kpy.high < 15000 && !(km > 130000)) good.push({ key: 'qc.good.lowKm' });
-  if (car.cabinFit === 'easy') good.push({ key: 'qc.good.cabinEasy' });
+  if (kpy !== null && kpy < 15000 && !(km > 130000)) good.push({ key: 'qc.good.lowKm' });
 
   if (!original) notes.push({ key: 'qc.note.askOwnership' });
 
@@ -175,7 +163,7 @@ export function quickCheck(car, { budget = null, comparison = null, pending = fa
   // rules the car out).
   const known = {
     price: price !== null && Boolean(cmp),
-    kmPerYear: Boolean(kpy) || (km !== null && km > 130000),
+    kmPerYear: kpy !== null || (km !== null && km > 130000),
     ownership: Boolean(original),
   };
   const knownCount = Object.values(known).filter(Boolean).length;

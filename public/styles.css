@@ -177,7 +177,9 @@ main { max-width: 1240px; margin-inline: auto; padding: 20px 16px 48px; }
 .row .plate { grid-column: 1; }
 .row .title { grid-column: 2; min-width: 0; font-weight: 500; }
 /* Ellipsis on the bdi, so it lands at the end of the text in its own direction. */
-.row .title bdi { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: match-parent; }
+.row .title > bdi { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: match-parent; }
+/* Location · km per year, muted, under the title. */
+.row .title .sub { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-1); font-weight: 400; color: var(--steel); text-align: match-parent; }
 .row .price { grid-column: 3; }
 .row .km { grid-column: 4; }
 .row .bar { grid-column: 5; }
@@ -199,6 +201,8 @@ main { max-width: 1240px; margin-inline: auto; padding: 20px 16px 48px; }
   .row .l1, .row .l2 { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .row .l1 > *, .row .l2 > * { grid-row: auto; }
   .row .l1 .title { flex: 1; }
+  /* Phones: the muted line wraps at the separator instead of cutting off km/year. */
+  .row .title .sub { white-space: normal; text-overflow: clip; }
   .row .l2 { font-size: var(--fs-1); }
   .row .l2 .bar { flex: 1; min-width: 72px; }
   .row .l2 .price, .row .l2 .km, .row .l2 .cov { text-align: start; white-space: nowrap; }
@@ -210,6 +214,10 @@ main { max-width: 1240px; margin-inline: auto; padding: 20px 16px 48px; }
 .field > .label { display: flex; align-items: center; gap: 8px; font-size: var(--fs-1); color: var(--steel); min-height: 20px; }
 .field.full { grid-column: 1 / -1; }
 .hint { font-size: var(--fs-1); color: var(--steel); }
+/* Read-only km per year next to the km field and in the breakdown. */
+.kpy { font-size: var(--fs-1); color: var(--steel); }
+.kpy .kpy-n { color: var(--ink, inherit); font-weight: 500; }
+.breakdown .kpy { font-weight: 400; margin-block-start: 2px; }
 
 input[type=text], input[type=url], input[type=tel], input[type=month], input[type=date], input[type=password], select, textarea {
   width: 100%; min-height: var(--control-h); padding: 0 12px;

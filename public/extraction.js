@@ -33,6 +33,7 @@ export const EXTRACT_SCHEMA = {
     year: { ...INT, description: 'Model / production year (שנה, שנת ייצור).' },
     firstRegistration: { ...STR, description: 'First road registration (עלייה לכביש) as YYYY-MM.' },
     currentKm: { ...INT, description: 'Current kilometers (ק"מ), number only.' },
+    location: { ...STR, description: 'City or area where the car is (מיקום / אזור), as written in the ad.' },
     askingPrice: { ...INT, description: 'Asking price in ₪, number only.' },
     handCount: { ...INT, description: 'Hand (יד): number of owners. יד ראשונה = 1.' },
     originalOwnership: { ...STR, description: 'One of: private, private_lease, fleet_lease, rental, driving_school.' },
@@ -118,7 +119,7 @@ export function parseAnthropicResponse(body) {
 
 const TYPES = {
   plate: 'plate', make: 'text', model: 'text', trim: 'text', year: 'int', currentKm: 'int',
-  askingPrice: 'int', handCount: 'int', sellerPhone: 'phone',
+  askingPrice: 'int', handCount: 'int', sellerPhone: 'phone', location: 'text',
 };
 
 /** Validate model output into car fields. Anything invalid becomes null. */

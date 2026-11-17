@@ -83,7 +83,7 @@ export function adValue(car, key) {
  * facts fill gaps; compared fields are left alone. Returns { car, adIdentity }
  * where adIdentity holds the ad's own identity values that differed.
  */
-export function applyRegistry(car, gov, { models = [] } = {}) {
+export function applyRegistry(car, gov) {
   const out = { ...car, fieldSources: { ...(car.fieldSources || {}) } };
   const adIdentity = {};
   for (const key of IDENTITY_KEYS) {
@@ -92,7 +92,7 @@ export function applyRegistry(car, gov, { models = [] } = {}) {
     const mine = adValue(car, key);
     if (mine !== null) {
       const same = key === 'make' || key === 'model'
-        ? sameName(mine, theirs, { kind: key, models, make: car.make }) !== false
+        ? sameName(mine, theirs, { kind: key }) !== false
         : String(mine) === String(theirs);
       if (!same) adIdentity[key] = mine;
     }
@@ -116,7 +116,7 @@ export function applyRegistry(car, gov, { models = [] } = {}) {
  * car: the car (ad / manual values). reg: registry fields.
  * Returns [{ key, ad, reg, regDate?, status, code? }] in ROW_KEYS order.
  */
-export function comparisonRows(car, reg, { models = [] } = {}) {
+export function comparisonRows(car, reg) {
   if (!reg) return [];
   const rows = [];
   const row = (key, ad, regV, judge, extra = {}) => {
@@ -148,10 +148,10 @@ export function comparisonRows(car, reg, { models = [] } = {}) {
  * Seller-trust issues from the rows plus the ad's identity claims:
  * [{ code, key, ad, gov }]. A newer year in the ad also counts.
  */
-export function trustIssues(car, snapshot, { models = [] } = {}) {
+export function trustIssues(car, snapshot) {
   const reg = snapshot?.fields;
   if (!reg) return [];
-  const out = comparisonRows(car, reg, { models })
+  const out = comparisonRows(car, reg)
     .filter((r) => r.status === 'suspicious')
     .map((r) => ({ code: r.code, key: r.key, ad: r.ad, gov: r.reg }));
   const adYear = num(snapshot.ad?.year);

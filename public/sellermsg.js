@@ -4,7 +4,7 @@
 // functions/api/seller-message.js; the old template (seller.js) is the fallback.
 
 import { num } from './scoring.js';
-import { kmPerYear } from './quickcheck.js';
+import { kmPerYear } from './scoring.js';
 import { TRUST_CODES } from './govcompare.js';
 
 export const MAX_QUESTIONS = 6;
@@ -30,7 +30,7 @@ export function sellerTopics(car, { asOf } = {}) {
   const topics = [];
   const kpy = kmPerYear(car, asOf);
   const hands = num(car.handCount) ?? (Array.isArray(car.ownershipHistory) ? car.ownershipHistory.length || null : null);
-  if ((kpy && kpy.low > 20000) || num(car.currentKm) > 120000) topics.push('highKm');
+  if ((kpy && kpy.value > 20000) || num(car.currentKm) > 120000) topics.push('highKm');
   if (HYBRID.test(`${car.make || ''} ${car.model || ''} ${car.trim || ''}`)) topics.push('hybrid');
   if (car.originalOwnership === 'private_lease' || car.originalOwnership === 'fleet_lease') topics.push('leaseRecords');
   if (hands !== null && hands >= 2) topics.push('whySelling');

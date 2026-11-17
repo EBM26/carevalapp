@@ -29,7 +29,6 @@ Stack: Cloudflare Pages (static `public/`), Pages Functions (`functions/`), D1. 
 | `public/extraction.js` | LLM prompt, JSON schema, request builders and parsers |
 | `public/seller.js` | WhatsApp message to the seller |
 | `public/i18n.js` | Every UI string (English / Hebrew) |
-| `public/models.json` | Cabin-fit table (model → easy / adequate / tight). Edit freely |
 | `public/app.js`, `index.html`, `styles.css` | UI |
 | `public/tests.html`, `tests.js` | Test suite (browser), also runnable in Node |
 | `functions/_middleware.js` | Password protection for every page and `/api` route (login page, signed session cookie, logout) |
@@ -178,12 +177,13 @@ Existing databases need each file in `migrations/` applied once, in order. New d
 | File | What it does | SQL to paste in the D1 console |
 |---|---|---|
 | `0002_model_notes.sql` | Adds the cache column for "Known issues for this model" | `ALTER TABLE cars ADD COLUMN model_notes TEXT;` |
-| `0004_registry_snapshot.sql` | Stores the last registry lookup per car, so the list can show seller-trust flags | `ALTER TABLE cars ADD COLUMN registry TEXT;` |
 | `0003_quick_check.sql` | Adds the `settings` table (budget ceiling) and the cache column for the AI price estimate | `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT NOT NULL);` then `ALTER TABLE cars ADD COLUMN price_estimate TEXT;` |
+| `0004_registry_snapshot.sql` | Stores the last registry lookup per car, so the list can show seller-trust flags | `ALTER TABLE cars ADD COLUMN registry TEXT;` |
+| `0005_location.sql` | Adds the car's location (city / area). **Required:** saving a car fails until it's applied | `ALTER TABLE cars ADD COLUMN location TEXT;` |
 
-If the console answers `duplicate column name`, the migration is already applied. Until a migration is applied the app still works: "Known issues" and the AI price estimate just aren't cached, and the budget ceiling can't be saved.
+If the console answers `duplicate column name`, the migration is already applied. The old `cabin_fit` column is no longer used; it's left in place (no destructive migration). Until migrations 0002–0004 are applied the app still works: "Known issues" and the AI price estimate just aren't cached, and the budget ceiling can't be saved.
 
-Locally, for each file: `npx wrangler d1 execute DB --local -c wrangler.local.toml --file=migrations/0002_model_notes.sql` (and `0003_quick_check.sql`).
+Locally, for each file: `npx wrangler d1 execute DB --local -c wrangler.local.toml --file=migrations/0002_model_notes.sql` (then `0003`, `0004`, `0005`).
 
 ## Changing the schema later
 
@@ -195,7 +195,11 @@ The production database is managed through the D1 console. For a new column:
 
 ## What happens automatically on the edit screen
 
-- **Cabin fit** is set from `public/models.json` as soon as make and model are known (from a screenshot, typing or the registry), tagged "From model list". If you pick it yourself, your choice is never overwritten. Models that aren't in the table stay Unknown.
+- **Km per year** is worked out whenever possible and shown read-only next to the km field, in the list row and in the breakdown's mileage row. One function (`kmPerYear` in `public/scoring.js`) feeds the mileage score, the quick check and the seller message:
+  - km: the higher of the ad km and the last-test km;
+  - time on the road: from the first registration (registry) if known, otherwise from July 1 of the model year, labelled "estimated from year";
+  - if the only km is the last-test km, the time runs to the last-test date, not to today.
+- **Location** (city / area, free text) is read from screenshots and editable in "Car & plate". It shows under the car in the list and isn't scored.
 - **Registry lookup** runs 600 ms after the plate becomes valid. Make, model, year and first registration take the registry value silently. Owners, original ownership, km, test date and trim keep what the ad (or you) said, and an **"Ad vs. registry"** table shows both side by side with ✓ match, ≠ differs, ⚠ suspicious or – unknown. **Scoring uses the registry value wherever there is one**; for km, the higher of ad km and last-test km. (If you chose private/fleet lease and the registry just says lease, your choice is kept.)
 - **Loading states:** screenshots show thumbnails with a shimmer while being read; the price estimate, seller message and known issues each show a skeleton with a short label. With "reduce motion" turned on, these show a static "Working…" instead.
 
@@ -213,12 +217,16 @@ Other differences (more owners, other ownership differences, lower or unrecognis
 
 With at least one suspicious row: a red "Ad doesn't match the registry" banner tops the score panel, the car gets a red flag in the list, the quick check adds a Maybe reason (two or more: Skip), and the seller message (AI or template) asks one polite question about each. The list needs migration `0004` to know a car's registry data.
 
+## Score total
+
+The categories add up to 94 points (history 30, price 25, mileage 20, ownership 15, test 2, tires 2). The total, its range and the coverage % are shown out of 100: raw × 100 / 94, rounded (94 → 100, 47 → 50). The 60 / 80 rating thresholds apply to that scaled total. The breakdown still shows each category against its own maximum (e.g. 25 / 25).
+
 ## Quick check rules
 
 Defined in `public/quickcheck.js`. Unknown fields never count against a car.
 
-- **Skip** (any one): asking price above your budget ceiling (⋯ menu → Settings); rental or driving-school ownership; 3+ hands on a car under 5 years old; over 28,000 km a year or over 130,000 km in total; tight cabin fit; a confirmed deal-breaker.
-- **Maybe:** ex-fleet lease, or 2nd hand ex-lease; 22,001–28,000 km a year; price more than 5% above the comparison; adequate cabin fit; no price comparison available.
+- **Skip** (any one): asking price above your budget ceiling (⋯ menu → Settings); rental or driving-school ownership; 3+ hands on a car under 5 years old; over 28,000 km a year or over 130,000 km in total; a confirmed deal-breaker.
+- **Maybe:** ex-fleet lease, or 2nd hand ex-lease; 22,001–28,000 km a year; price more than 5% above the comparison; no price comparison available.
 - **Not enough info:** if fewer than 2 of (price comparison, km/year, ownership) are known, the verdict is "Not enough info" (grey), unless a Skip reason already rules the car out.
 - **Verdict:** any Skip reason or 3+ Maybe reasons → Skip; 1–2 → Maybe; none → Pursue.
 - **Price comparison,** first available: a Levi Yitzhak price (or Yad2 range) you entered; the median of 3+ saved cars with the same make and model, year ±1, adjusted by ₪0.15 per km (`KM_PRICE_ADJUST`); a rough AI estimate, fetched on the edit screen and cached per car.

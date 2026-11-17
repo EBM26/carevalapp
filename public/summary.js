@@ -2,7 +2,7 @@
 // Each item is { key, vars } where key is an i18n key under sum.good.* /
 // sum.watch.*. Rules are listed in priority order; at most 3 per list.
 
-import { num } from './scoring.js';
+import { num, carKm } from './scoring.js';
 
 export const MAX_ITEMS = 3;
 
@@ -29,14 +29,13 @@ export function summarize(car, r, { asOf = new Date() } = {}) {
   const dev = r.parts.price.deviation;
   const types = ownerTypes(car);
   const hands = num(car.handCount);
-  const km = num(car.currentKm);
+  const km = carKm(car);
 
   // ----- good signs -----
   if (hands === 1 && car.originalOwnership === 'private') good.push({ key: 'sum.good.firstHandPrivate' });
   if (typeof dev === 'number' && dev <= -0.05) good.push({ key: 'sum.good.belowBenchmark', vars: { n: Math.round(-dev * 100) } });
   if (typeof kpy === 'number' && kpy < 15000) good.push({ key: 'sum.good.lowKm', vars: { km: round100(kpy) } });
   if (car.insuranceClaims === 'none' && car.serviceHistory === 'full') good.push({ key: 'sum.good.cleanHistory' });
-  if (car.cabinFit === 'easy') good.push({ key: 'sum.good.cabinEasy' });
   if (car.tires === 'good') good.push({ key: 'sum.good.tiresGood' });
 
   // ----- watch out -----
@@ -55,7 +54,6 @@ export function summarize(car, r, { asOf = new Date() } = {}) {
   }
   if (hands !== null && hands >= 3) watch.push({ key: 'sum.watch.manyHands', vars: { n: hands } });
   if (car.tires === 'worn') watch.push({ key: 'sum.watch.wornTires' });
-  if (car.cabinFit === 'tight') watch.push({ key: 'sum.watch.cabinTight' });
   if (car.serviceHistory === 'missing_1_2_years' || car.serviceHistory === 'none') watch.push({ key: 'sum.watch.serviceGaps' });
 
   return { good: good.slice(0, MAX_ITEMS), watch: watch.slice(0, MAX_ITEMS) };

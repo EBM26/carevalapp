@@ -13,17 +13,19 @@ export const WEIGHTS = {
   price: 25,
   mileage: 20,
   ownership: 15,
-  cabin: 6,
   test: 2,
   tires: 2,
 };
+
+/** Raw points available (94). Totals are shown out of 100: raw × 100 / RAW_TOTAL, rounded. */
+export const RAW_TOTAL = Object.values(WEIGHTS).reduce((a, b) => a + b, 0);
+export const scaleTo100 = (raw) => Math.round((raw * 100) / RAW_TOTAL);
 
 export const ENUMS = {
   benchmarkSource: ['levi_yitzhak', 'yad2_comparables'],
   ownershipType: ['private', 'private_lease', 'fleet_lease', 'rental', 'driving_school'],
   insuranceClaims: ['none', 'cosmetic', 'moderate', 'major'],
   serviceHistory: ['full', 'mostly', 'missing_1_2_years', 'none'],
-  cabinFit: ['easy', 'adequate', 'tight'],
   tires: ['good', 'ok', 'worn'],
   triState: ['no', 'unknown', 'yes'],
   status: ['considering', 'contacted', 'inspected', 'rejected', 'bought'],
@@ -33,7 +35,6 @@ export const DEAL_BREAKERS = ['structuralDamage', 'totalLoss', 'lien', 'sellerRe
 
 const CLAIMS_POINTS = { none: 30, cosmetic: 20, moderate: 10, major: 0 };
 const SERVICE_POINTS = { full: 30, mostly: 20, missing_1_2_years: 10, none: 0 };
-const CABIN_POINTS = { easy: 6, adequate: 3, tight: 0 };
 const TIRE_POINTS = { good: 2, ok: 1, worn: 0 };
 
 // ---------- helpers ----------
@@ -104,11 +105,50 @@ export function ageMonthsRange(car, ref) {
   return null;
 }
 
+// ---------- km per year (the one shared calculation) ----------
+
+/** The car's km: the higher of the ad km and the last-test km, or null. */
+export function carKm(car) {
+  const ad = num(car.currentKm);
+  const test = num(car.lastTestKm);
+  if (ad === null) return test;
+  return test === null ? ad : Math.max(ad, test);
+}
+
+function refMonth(asOf) {
+  if (asOf && typeof asOf === 'object' && !(asOf instanceof Date) && 'y' in asOf) return { y: asOf.y, m: asOf.m };
+  const { y, m } = ymd(asOf ?? new Date());
+  return { y, m };
+}
+
+/**
+ * Average km per year, or null when there is no km or no age.
+ *   km:    the higher of ad km and last-test km.
+ *   start: first registration (registry) if known; else July 1 of the model
+ *          year ("estimated from year").
+ *   end:   today, or the last-test date when the only km is the last-test km.
+ * Returns { value (whole km), km, months, from: 'registration' | 'year', estimated, toTest }.
+ */
+export function kmPerYear(car, asOf) {
+  car = car || {};
+  const km = carKm(car);
+  if (km === null) return null;
+  const fr = parseYearMonth(car.firstRegistration);
+  const year = num(car.year);
+  let start;
+  if (fr) start = fr;
+  else if (year !== null && year >= 1900) start = { y: Math.floor(year), m: 7 };
+  else return null;
+  const toTest = num(car.currentKm) === null && parseYearMonth(car.lastTestDate) !== null;
+  const end = toTest ? parseYearMonth(car.lastTestDate) : refMonth(asOf);
+  const months = Math.max(1, monthIndex(end) - monthIndex(start));
+  return { value: Math.round((km * 12) / months), km, months, from: fr ? 'registration' : 'year', estimated: !fr, toTest };
+}
+
 // ---------- band functions (single known value → points) ----------
 
 export function claimsPoints(v) { return CLAIMS_POINTS[v]; }
 export function servicePoints(v) { return SERVICE_POINTS[v]; }
-export function cabinPoints(v) { return CABIN_POINTS[v]; }
 export function tirePoints(v) { return TIRE_POINTS[v]; }
 
 /**
@@ -225,40 +265,20 @@ function scorePrice(car) {
 }
 
 function scoreMileage(car, asOf) {
-  const ref = { y: asOf.y, m: asOf.m };
-  let km = num(car.currentKm);
+  const km = carKm(car);
+  const k = kmPerYear(car, asOf);
   const notes = [];
-  const missing = [];
-  let ageRef = ref;
+  if (km !== null && num(car.currentKm) === null) notes.push('km_from_last_test');
+  if (k?.estimated) notes.push('km_year_estimated');
   if (km === null) {
-    const lt = num(car.lastTestKm);
-    if (lt !== null) {
-      km = lt;
-      notes.push('km_from_last_test');
-      // If we know when the last test was, measure age up to that date.
-      const ltd = parseYearMonth(car.lastTestDate);
-      if (ltd) ageRef = ltd;
-    }
+    const missing = ['currentKm'];
+    if (!parseYearMonth(car.firstRegistration) && num(car.year) === null) missing.push('firstRegistration');
+    return { min: 0, max: WEIGHTS.mileage, missing, notes, kmPerYear: null, kpy: null };
   }
-  const age = ageMonthsRange(car, ageRef);
-  if (km === null) missing.push('currentKm');
-  if (!parseYearMonth(car.firstRegistration)) missing.push('firstRegistration');
-
-  if (km === null) return { min: 0, max: WEIGHTS.mileage, missing, notes };
-  if (km > 130000) return { min: 0, max: 0, missing: [], notes, kmPerYear: null };
-  if (!age) return { min: 0, max: WEIGHTS.mileage, missing, notes };
-
-  // Older (more months) → fewer km/year → more points.
-  const kpyLow = (km * 12) / age.max;
-  const kpyHigh = (km * 12) / age.min;
-  return {
-    min: mileagePoints(kpyHigh, km),
-    max: mileagePoints(kpyLow, km),
-    missing: age.min === age.max ? missing.filter((f) => f !== 'firstRegistration') : missing,
-    notes,
-    kmPerYear: age.min === age.max ? kpyLow : null,
-    kmPerYearRange: [kpyLow, kpyHigh],
-  };
+  if (km > 130000) return { min: 0, max: 0, missing: [], notes, kmPerYear: k?.value ?? null, kpy: k };
+  if (!k) return { min: 0, max: WEIGHTS.mileage, missing: ['firstRegistration'], notes, kmPerYear: null, kpy: null };
+  const p = mileagePoints(k.value, km);
+  return { min: p, max: p, missing: [], notes, kmPerYear: k.value, kpy: k };
 }
 
 function scoreOwnership(car, asOf) {
@@ -372,18 +392,21 @@ export function scoreCar(car, opts = {}) {
     price: scorePrice(car),
     mileage: scoreMileage(car, asOf),
     ownership: scoreOwnership(car, asOf),
-    cabin: scoreSimple(car.cabinFit, CABIN_POINTS, 'cabinFit'),
     test: scoreTest(car, asOf),
     tires: scoreSimple(car.tires, TIRE_POINTS, 'tires'),
   };
   for (const [k, p] of Object.entries(parts)) p.weight = WEIGHTS[k];
 
-  let scoreMin = 0, scoreMax = 0, coverage = 0;
+  let rawMin = 0, rawMax = 0, rawKnown = 0;
   for (const p of Object.values(parts)) {
-    scoreMin += p.min;
-    scoreMax += p.max;
-    if (p.min === p.max) coverage += p.weight;
+    rawMin += p.min;
+    rawMax += p.max;
+    if (p.min === p.max) rawKnown += p.weight;
   }
+  // The categories add up to RAW_TOTAL (94); totals are shown out of 100.
+  const scoreMin = scaleTo100(rawMin);
+  const scoreMax = scaleTo100(rawMax);
+  const coverage = scaleTo100(rawKnown);
 
   // Category view as in the spec: 5b "upfront condition" = test + tires.
   const categories = {
@@ -391,7 +414,6 @@ export function scoreCar(car, opts = {}) {
     price: parts.price,
     mileage: parts.mileage,
     ownership: parts.ownership,
-    cabin: parts.cabin,
     condition: {
       min: parts.test.min + parts.tires.min,
       max: parts.test.max + parts.tires.max,
@@ -421,12 +443,14 @@ export function scoreCar(car, opts = {}) {
   const notes = Object.values(parts).flatMap((p) => p.notes);
 
   return {
-    scoreMin,
+    scoreMin,     // out of 100 (scaled from RAW_TOTAL)
     scoreMax,
+    rawMin,       // raw points, out of RAW_TOTAL
+    rawMax,
     rating,       // band of the worst case (or AVOID if a deal-breaker is confirmed)
     ratingMax,    // band of the best case
     confirmed,    // true when rating === ratingMax
-    coverage,     // 0–100, points fully determined
+    coverage,     // 0–100, share of points fully determined
     parts,
     categories,
     dealBreakers: db,

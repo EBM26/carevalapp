@@ -2,14 +2,14 @@
 // in Node (`node scripts/run-tests.js`). All tests pin asOf so results are
 // deterministic regardless of today's date.
 
-import { scoreCar, band, num, ENUMS, DEAL_BREAKERS, WEIGHTS } from './scoring.js';
+import { scoreCar, band, num, ENUMS, DEAL_BREAKERS, WEIGHTS, RAW_TOTAL, scaleTo100, carKm, kmPerYear as kpyOf } from './scoring.js';
 import { FIELDS, sanitizeCar } from './fields.js';
 import { STRINGS, SELLER } from './i18n.js';
 import { configError, passwordMatches, createSession, verifySession, SESSION_SECONDS } from './auth.js';
 import { verdict, knownPoints } from './verdict.js';
 import { summarize } from './summary.js';
 import { formatPlate } from './format.js';
-import { matchModel, sameName, canonicalMake } from './modelmatch.js';
+import { sameName, canonicalMake } from './modelmatch.js';
 import { applyRegistry, comparisonRows, trustIssues, effectiveCar, isHigherTrim, trimTier, cleanSnapshot, adValue } from './govcompare.js';
 import { trustQuestions } from './seller.js';
 import { quickCheck, findComparables, savedComparison, resolveComparison, estimateKey, kmPerYear, KM_PRICE_ADJUST } from './quickcheck.js';
@@ -39,7 +39,7 @@ const PERFECT = {
   askingPrice: 90000, benchmarkPrice: 100000, benchmarkSource: 'levi_yitzhak',
   firstRegistration: '2024-11', currentKm: 20000,          // 24 months → 10,000 km/yr
   originalOwnership: 'private', handCount: 1,
-  cabinFit: 'easy', testExpiry: '2027-10-01', tires: 'good',
+  testExpiry: '2027-10-01', tires: 'good',
   dealBreakers: { structuralDamage: 'no', totalLoss: 'no', lien: 'no', sellerRefuses: 'no' },
 };
 
@@ -130,10 +130,18 @@ test('3 Mileage', 'lastTestKm with lastTestDate: age measured to test date', () 
   const r = S({ lastTestKm: 16000, lastTestDate: '2025-11-01', firstRegistration: '2024-11' });
   eq(range(r.parts.mileage), [14, 14]);
 });
-test('3 Mileage', 'only model year known → range over Jan–Dec registration', () => {
-  // 2024: age 23 months (Dec 2024) to 34 months (Jan 2024).
-  // 30,000 km → 15,652/yr (14) .. 10,588/yr (20)
-  eq(range(S({ currentKm: 30000, year: 2024 }).parts.mileage), [14, 20]);
+test('3 Mileage', 'only model year known → estimated from July 1 of that year', () => {
+  // 2024-07 → 2026-11 = 28 months; 30,000 km → 12,857/yr → 20
+  const r = S({ currentKm: 30000, year: 2024 });
+  eq(range(r.parts.mileage), [20, 20]);
+  eq(r.parts.mileage.kmPerYear, 12857);
+  eq(r.notes.includes('km_year_estimated'), true);
+});
+test('3 Mileage', 'ad km below last-test km → the higher (last-test) km is scored', () => {
+  // 2025-11 → 12 months. Ad 14,000 (→ 20) but test 16,000 → 16,000/yr → 14
+  const r = S({ currentKm: 14000, lastTestKm: 16000, firstRegistration: '2025-11' });
+  eq(range(r.parts.mileage), [14, 14]);
+  eq(r.parts.mileage.kmPerYear, 16000);
 });
 test('3 Mileage', 'km unknown → [0, 20]', () => eq(range(S({ firstRegistration: '2022-01' }).parts.mileage), [0, 20]));
 test('3 Mileage', 'km known, age unknown → [0, 20]', () => eq(range(S({ currentKm: 50000 }).parts.mileage), [0, 20]));
@@ -172,12 +180,99 @@ test('4 Ownership', '2 hands, original private, 2nd owner unknown → [0, 11]', 
   eq(own({ originalOwnership: 'private', handCount: 2 }), [0, 11]));
 test('4 Ownership', '1 hand, type unknown → [0, 15]', () => eq(own({ handCount: 1 }), [0, 15]));
 
-// ---------------- Category 5a: Cabin fit ----------------
+// ---------------- km per year (one shared function) ----------------
 
-for (const [fit, pts] of [['easy', 6], ['adequate', 3], ['tight', 0]]) {
-  test('5a Cabin', `${fit} → ${pts}`, () => eq(range(S({ cabinFit: fit }).parts.cabin), [pts, pts]));
-}
-test('5a Cabin', 'unknown → [0, 6]', () => eq(range(S({}).parts.cabin), [0, 6]));
+test('km/year', 'from the registry first-registration date', () =>
+  eq(kpyOf({ currentKm: 36000, firstRegistration: '2024-11', year: 2023 }, AS_OF),
+    { value: 18000, km: 36000, months: 24, from: 'registration', estimated: false, toTest: false }));
+test('km/year', 'model-year fallback assumes July 1, marked estimated', () => {
+  // 2023-07 → 2026-11 = 40 months; 60,000 km → 18,000/yr
+  const k = kpyOf({ currentKm: 60000, year: 2023 }, AS_OF);
+  eq([k.value, k.months, k.from, k.estimated], [18000, 40, 'year', true]);
+});
+test('km/year', 'only the last-test km → divided by the time up to the test date', () => {
+  // 2023-01 → test 2025-01 = 24 months; 40,000 km → 20,000/yr (to today it would be 10,435)
+  const k = kpyOf({ lastTestKm: 40000, lastTestDate: '2025-01-20', firstRegistration: '2023-01' }, AS_OF);
+  eq([k.value, k.months, k.toTest], [20000, 24, true]);
+});
+test('km/year', 'last-test km without a test date → up to today', () =>
+  eq(kpyOf({ lastTestKm: 46000, firstRegistration: '2023-01' }, AS_OF).value, 12000));
+test('km/year', 'uses the higher of ad km and last-test km', () => {
+  eq(carKm({ currentKm: 50000, lastTestKm: 60000 }), 60000);
+  eq(carKm({ currentKm: 70000, lastTestKm: 60000 }), 70000);
+  eq(kpyOf({ currentKm: 50000, lastTestKm: 60000, lastTestDate: '2025-01-20', firstRegistration: '2023-11' }, AS_OF).value, 20000);
+});
+test('km/year', 'no km or no age → null', () => {
+  eq(kpyOf({ year: 2022 }, AS_OF), null);
+  eq(kpyOf({ currentKm: 50000 }, AS_OF), null);
+});
+test('km/year', 'scoring, quick check and the seller topics use the same value', () => {
+  const car = { currentKm: 75000, year: 2023, originalOwnership: 'private' }; // 40 months → 22,500/yr
+  eq(S(car).parts.mileage.kmPerYear, 22500);
+  eq(range(S(car).parts.mileage), [7, 7]);
+  eq(quickCheck(car, { asOf: AS_OF }).maybe.map((r) => r.key), ['qc.maybe.kmYear']);
+  eq(sellerTopics(car, { asOf: AS_OF }).includes('highKm'), true);
+});
+
+// ---------------- Location ----------------
+
+test('Location', 'free-text field: kept, trimmed, stored in its own column, not scored', () => {
+  const car = sanitizeCar({ ...PERFECT, location: '  Tel Aviv  ' });
+  eq(car.location, 'Tel Aviv');
+  eq(FIELDS.find((f) => f.key === 'location').col, 'location');
+  eq(S(car).scoreMin, S(PERFECT).scoreMin, 'no score change');
+  eq(sanitizeCar({ location: '   ' }).location, null);
+});
+test('Location', 'screenshot extraction reads the city', () => {
+  eq('location' in EXTRACT_SCHEMA.properties && EXTRACT_SCHEMA.required.includes('location'), true);
+  eq(normalizeExtraction({ location: ' פתח תקווה ' }).location, 'פתח תקווה');
+  eq(normalizeExtraction({}).location, null);
+});
+test('Location', 'has EN and HE labels', () => eq([STRINGS.en['field.location'], STRINGS.he['field.location']], ['Location', 'מיקום']));
+
+// ---------------- Cabin fit is gone ----------------
+
+test('No cabin fit', 'not a field, a weight, an enum or a string', () => {
+  eq(FIELDS.some((f) => f.key === 'cabinFit'), false, 'field');
+  eq('cabin' in WEIGHTS || 'cabinFit' in ENUMS, false, 'weight/enum');
+  eq(Object.keys(STRINGS.en).filter((k) => /cabin/i.test(k)), [], 'strings');
+  eq(JSON.stringify(STRINGS).match(/stroller|car seats|עגלה/gi), null, 'text');
+});
+test('No cabin fit', 'a stored cabin_fit value is ignored everywhere', () => {
+  const car = { ...PERFECT, cabinFit: 'tight' };
+  eq(sanitizeCar(car).cabinFit, undefined, 'sanitize drops it');
+  eq(S(car).scoreMin, 100, 'score');
+  eq('cabin' in S(car).parts, false, 'parts');
+  eq(quickCheck(car, { asOf: AS_OF }).skip, [], 'quick check');
+  eq(summarize(car, S(car), { asOf: AS_OF }).watch, [], 'summary');
+  eq(/cabin|stroller/i.test(sellerPrompt(car, { reasons: [] })), false, 'seller prompt');
+});
+
+// ---------------- Totals scaled to 100 ----------------
+
+test('Scaling', 'categories total 94 raw points, shown out of 100', () => {
+  eq(RAW_TOTAL, 94);
+  eq([94, 47, 0, 56, 75].map(scaleTo100), [100, 50, 0, 60, 80]);
+});
+test('Scaling', 'perfect raw 94 → 100; categories keep their own maximums', () => {
+  const r = S(PERFECT);
+  eq([r.rawMin, r.scoreMin], [94, 100]);
+  eq([r.parts.price.max, r.parts.price.weight, r.parts.mileage.weight], [25, 25, 20]);
+});
+test('Scaling', 'raw 47 → 50 (history 30 + mileage 14 + test 2 + tires 1)', () => {
+  const r = S({ insuranceClaims: 'none', serviceHistory: 'full', currentKm: 15000, firstRegistration: '2025-11',
+    askingPrice: 200000, benchmarkPrice: 100000, originalOwnership: 'rental', handCount: 1, testExpiry: '2027-10-01', tires: 'ok' });
+  eq([r.rawMin, r.rawMax, r.scoreMin, r.scoreMax, r.coverage], [47, 47, 50, 50, 100]);
+  eq(r.rating, 'AVOID');
+});
+test('Scaling', 'the 60/80 thresholds apply to the scaled total', () => {
+  // service mostly (20) + price at benchmark (18) + mileage 20 + ownership 15 + test 1 + tires 1 = raw 75 → 80
+  const s80 = S({ ...PERFECT, serviceHistory: 'mostly', askingPrice: 100000, tires: 'ok', testExpiry: '2027-03-01' });
+  eq([s80.rawMin, s80.scoreMin, s80.rating], [75, 80, 'STRONG_BUY']);
+  // same with tires worn: raw 74 → 79 → OK
+  const s79 = S({ ...PERFECT, serviceHistory: 'mostly', askingPrice: 100000, tires: 'worn', testExpiry: '2027-03-01' });
+  eq([s79.rawMin, s79.scoreMin, s79.rating], [74, 79, 'OK']);
+});
 
 // ---------------- Category 5b: Upfront condition ----------------
 // asOf 2026-11-16: +6 months = 2027-05-16, +3 months = 2027-02-16.
@@ -243,7 +338,7 @@ test('Inputs', 'numbers as strings with commas/₪ are parsed', () =>
 // ---------------- Worked example from the spec ----------------
 /*
   2022 Corolla sedan, first registered Jan 2022, 86,000 km, scored Nov 2026,
-  1st hand private lease, cabin easy, everything else unknown.
+  1st hand private lease, everything else unknown.
 
   1 History    claims ?, service ?          → [0, 30]
   2 Price      asking ?, benchmark ?        → [0, 25]
@@ -252,32 +347,32 @@ test('Inputs', 'numbers as strings with commas/₪ are parsed', () =>
                                             → [14, 14]
   4 Ownership  1 hand, private lease        → [11, 11]
                (car is < 5 yrs old, but only 1 hand, so the 0-rule doesn't apply)
-  5a Cabin     easy                         → [6, 6]
   5b Condition test ? [0, 2] + tires ? [0, 2] → [0, 4]
   ─────────────────────────────────────────────────────
-  Total  min = 0 + 0 + 14 + 11 + 6 + 0  = 31
-         max = 30 + 25 + 14 + 11 + 6 + 4 = 90
-  Rating: 31 → AVOID, 90 → STRONG BUY → provisional "31–90: AVOID → possibly STRONG BUY"
-  Coverage: mileage 20 + ownership 15 + cabin 6 = 41%
+  Raw    min = 0 + 0 + 14 + 11 + 0  = 25  of 94
+         max = 30 + 25 + 14 + 11 + 4 = 84
+  Scaled ×100/94: 25 → 27, 84 → 89
+  Rating: 27 → AVOID, 89 → STRONG BUY → provisional "27–89: AVOID → possibly STRONG BUY"
+  Coverage: mileage 20 + ownership 15 = 35 of 94 → 37%
   Find out next: history (30), price (25), test (2), tires (2)
   Deal-breakers: all 4 open.
 */
-test('Example', '2022 Corolla, private lease, 86k km → [31, 90], coverage 41%', () => {
+test('Example', '2022 Corolla, private lease, 86k km → [27, 89], coverage 37%', () => {
   const r = S({
     make: 'Toyota', model: 'Corolla', trim: 'sedan', year: 2022,
     firstRegistration: '2022-01', currentKm: 86000,
-    originalOwnership: 'private_lease', handCount: 1, cabinFit: 'easy',
+    originalOwnership: 'private_lease', handCount: 1,
   });
   eq(range(r.parts.history), [0, 30], 'history');
   eq(range(r.parts.price), [0, 25], 'price');
   eq(range(r.parts.mileage), [14, 14], 'mileage');
   eq(Math.round(r.parts.mileage.kmPerYear), 17793, 'km/yr');
   eq(range(r.parts.ownership), [11, 11], 'ownership');
-  eq(range(r.parts.cabin), [6, 6], 'cabin');
   eq(range(r.categories.condition), [0, 4], 'condition');
-  eq([r.scoreMin, r.scoreMax], [31, 90], 'total');
+  eq([r.rawMin, r.rawMax], [25, 84], 'raw');
+  eq([r.scoreMin, r.scoreMax], [27, 89], 'total');
   eq([r.rating, r.ratingMax, r.confirmed], ['AVOID', 'STRONG_BUY', false], 'rating');
-  eq(r.coverage, 41, 'coverage');
+  eq(r.coverage, 37, 'coverage');
   eq(r.nextSteps.map((s) => [s.part, s.impact]), [['history', 30], ['price', 25], ['test', 2], ['tires', 2]], 'next steps');
   eq(r.dealBreakers.open.length, 4, 'open deal-breakers');
 });
@@ -297,7 +392,7 @@ test('i18n', 'every code the scorer/form can produce has a string', () => {
     ...DEAL_BREAKERS.map((k) => `db.${k}`),
     ...ENUMS.triState.map((v) => `tri.${v}`),
     ...ENUMS.ownershipType.map((v) => `ownershipType.${v}`),
-    ...['insuranceClaims', 'serviceHistory', 'cabinFit', 'tires', 'status'].flatMap((e) => ENUMS[e].map((v) => `${e}.${v}`)),
+    ...['insuranceClaims', 'serviceHistory', 'tires', 'status'].flatMap((e) => ENUMS[e].map((v) => `${e}.${v}`)),
     ...['odometer_rollback', 'structural_change'].map((w) => `warn.${w}`),
     ...['price_confidence_low', 'km_from_last_test', 'ownership_review'].map((n) => `note.${n}`),
     ...FIELDS.filter((f) => !['benchmarkSource', 'govStructuralChange'].includes(f.key)).map((f) => `field.${f.key}`),
@@ -546,12 +641,12 @@ test('Auth', 'token with an expiry beyond 30 days (forged far future) → invali
 // ---------------- Verdict (presentation of the score) ----------------
 
 const COROLLA = { make: 'Toyota', model: 'Corolla', year: 2022, firstRegistration: '2022-01', currentKm: 86000,
-  originalOwnership: 'private_lease', handCount: 1, cabinFit: 'easy' };
+  originalOwnership: 'private_lease', handCount: 1 };
 
-test('Verdict', 'Corolla example (41% known) → too early, 31 of 41 points so far', () => {
+test('Verdict', 'Corolla example (37% known) → too early, 25 of 35 points so far', () => {
   const v = verdict(S(COROLLA));
-  // known parts: mileage 14/20 + ownership 11/15 + cabin 6/6 = 31 of 41
-  eq([v.kind, v.known], ['TOO_EARLY', { x: 31, y: 41 }]);
+  // known parts: mileage 14/20 + ownership 11/15 = 25 of 35 (raw category points)
+  eq([v.kind, v.known], ['TOO_EARLY', { x: 25, y: 35 }]);
 });
 test('Verdict', 'fully unknown car → too early, 0 of 0', () => eq([verdict(S({})).kind, verdict(S({})).known], ['TOO_EARLY', { x: 0, y: 0 }]));
 test('Verdict', 'confirmed deal-breaker → avoid even at 100 and even when coverage is low', () => {
@@ -559,16 +654,16 @@ test('Verdict', 'confirmed deal-breaker → avoid even at 100 and even when cove
   eq(verdict(S({ dealBreakers: { lien: 'yes' } })).kind, 'AVOID');
 });
 test('Verdict', 'best case under 60 → avoid', () => {
-  // claims major (0), price way above (0), worn tires, tight cabin, ex-rental → max well below 60
-  const r = S({ insuranceClaims: 'major', askingPrice: 200000, benchmarkPrice: 100000, cabinFit: 'tight', tires: 'worn',
+  // claims major (0), price way above (0), worn tires, ex-rental → max well below 60
+  const r = S({ insuranceClaims: 'major', askingPrice: 200000, benchmarkPrice: 100000, tires: 'worn',
     originalOwnership: 'rental', handCount: 1, firstRegistration: '2025-11', currentKm: 40000 });
   eq(r.scoreMax < 60, true);
   eq([verdict(r).kind, verdict(r).reason], ['AVOID', 'lowMax']);
 });
 test('Verdict', '≥50% known, min under 60 but max ≥ 60 → OK (not avoid), possibly strong buy', () => {
-  // history unknown (0–30); price +8% (8 pts) → min 53, max 83, 70% known
+  // history unknown (0–30); price +8% (8 pts) → raw 47–77 of 94 → 50–82, 64 of 94 = 68% known
   const r = S({ ...PERFECT, insuranceClaims: null, serviceHistory: null, askingPrice: 108000 });
-  eq([r.coverage, r.scoreMin, r.scoreMax], [70, 53, 83]);
+  eq([r.coverage, r.scoreMin, r.scoreMax], [68, 50, 82]);
   const v = verdict(r);
   eq([v.kind, v.provisional, v.upTo, v.barTone], ['OK', true, 'STRONG_BUY', 'good']);
 });
@@ -591,9 +686,9 @@ test('Summary', 'good signs: 1st hand private, below benchmark, low km', () => {
   eq(s.watch, []);
 });
 test('Summary', 'at most 3 items each, in priority order', () => {
-  const s = sum({ ...PERFECT, cabinFit: 'easy', tires: 'good' });
+  const s = sum({ ...PERFECT, tires: 'good' });
   eq(s.good.length, 3);
-  const w = sum({ currentKm: 140000, lastTestKm: 150000, govStructuralChange: true, insuranceClaims: 'major', tires: 'worn', cabinFit: 'tight' }).watch;
+  const w = sum({ currentKm: 140000, lastTestKm: 150000, govStructuralChange: true, insuranceClaims: 'major', tires: 'worn' }).watch;
   eq(keys(w), ['odometer', 'structural', 'claimsMajor']);
 });
 test('Summary', 'ex-rental beats ex-fleet; fleet shown when no rental', () => {
@@ -607,15 +702,15 @@ test('Summary', 'price above benchmark, high km/year, test soon, expired test', 
   eq(keys(sum({ testExpiry: '2027-01-10' }).watch), ['testSoon']);
   eq(keys(sum({ testExpiry: '2026-10-01' }).watch), ['testExpired']);
 });
-test('Summary', 'worn tires, tight cabin, many hands, service gaps', () => {
-  eq(keys(sum({ tires: 'worn', cabinFit: 'tight' }).watch), ['wornTires', 'cabinTight']);
+test('Summary', 'worn tires, many hands, service gaps', () => {
+  eq(keys(sum({ tires: 'worn' }).watch), ['wornTires']);
   eq(keys(sum({ handCount: 4, serviceHistory: 'none' }).watch), ['manyHands', 'serviceGaps']);
 });
 test('Summary', 'empty car → both lists empty', () => eq(sum({}), { good: [], watch: [] }));
 test('Summary', 'every summary key has EN and HE strings', () => {
-  const all = ['firstHandPrivate', 'belowBenchmark', 'lowKm', 'cleanHistory', 'cabinEasy', 'tiresGood'].map((k) => `sum.good.${k}`)
+  const all = ['firstHandPrivate', 'belowBenchmark', 'lowKm', 'cleanHistory', 'tiresGood'].map((k) => `sum.good.${k}`)
     .concat(['odometer', 'structural', 'claimsMajor', 'claimsModerate', 'exRental', 'exFleet', 'aboveBenchmark', 'highTotalKm',
-      'highKm', 'testExpired', 'testSoon', 'manyHands', 'wornTires', 'cabinTight', 'serviceGaps'].map((k) => `sum.watch.${k}`));
+      'highKm', 'testExpired', 'testSoon', 'manyHands', 'wornTires', 'serviceGaps'].map((k) => `sum.watch.${k}`));
   eq(all.filter((k) => !STRINGS.en[k] || !STRINGS.he[k]), []);
 });
 
@@ -657,7 +752,7 @@ test('Not enough info', 'fewer than 2 of (price comparison, km/year, ownership) 
   eq(QC({ originalOwnership: 'private', handCount: 1 }).verdict, 'NOT_ENOUGH', 'ownership only');
   eq(QC({ currentKm: 10000, firstRegistration: '2025-11' }).verdict, 'NOT_ENOUGH', 'km/year only');
   eq(QC({ askingPrice: 95000 }, { comparison: CMP100 }).verdict, 'NOT_ENOUGH', 'price comparison only');
-  eq(QC({ cabinFit: 'easy', year: 2022, make: 'Toyota' }).verdict, 'NOT_ENOUGH', 'other fields don\'t count');
+  eq(QC({ tires: 'good', year: 2022, make: 'Toyota' }).verdict, 'NOT_ENOUGH', 'other fields don\'t count');
 });
 test('Not enough info', 'exactly 2 known → a real verdict', () => {
   eq(QC(KNOWN2).verdict, 'PURSUE');
@@ -669,7 +764,7 @@ test('Not enough info', 'price without a comparison, or a pending estimate, does
   eq(QC({ originalOwnership: 'private', askingPrice: 95000 }, { pending: true }).verdict, 'NOT_ENOUGH');
 });
 test('Not enough info', 'a definite Skip reason still shows Skip', () => {
-  eq(QC({ cabinFit: 'tight' }).verdict, 'SKIP');
+  eq(QC({ originalOwnership: 'rental' }).verdict, 'SKIP');
   eq(QC({ dealBreakers: { lien: 'yes' } }).verdict, 'SKIP');
   eq(QC({ currentKm: 140000 }).verdict, 'SKIP');
 });
@@ -704,16 +799,11 @@ test('Quick check', 'total km: 130,000 ok, 130,001 skip (even at low km/year)', 
   eq(QC({ currentKm: 130000, firstRegistration: '2016-11' }).skip, []);
   eq(qk(QC({ currentKm: 130001, firstRegistration: '2016-11' }).skip), ['highTotalKm']);
 });
-test('Quick check', 'model year only: km/year uses the best case for skip/maybe', () => {
-  // 2024, 30,000 km → 10,588–15,652 km/yr: no maybe, and not "low km" (worst case ≥ 15,000)
-  eq(kmPerYear({ year: 2024, currentKm: 30000 }, AS_OF), { low: 10588, high: 15652 });
+test('Quick check', 'model year only: km/year estimated from July 1 of that year', () => {
+  // 2024-07 → 2026-11 = 28 months; 30,000 km → 12,857 km/yr → low km
+  eq(kmPerYear({ year: 2024, currentKm: 30000 }, AS_OF).value, 12857);
   const q = QC({ year: 2024, currentKm: 30000 });
-  eq([q.maybe, q.good], [[], []]);
-});
-test('Quick check', 'cabin: tight skip, adequate maybe, easy good sign', () => {
-  eq(qk(QC({ cabinFit: 'tight' }).skip), ['cabinTight']);
-  eq(qk(QC({ cabinFit: 'adequate' }).maybe), ['cabinAdequate']);
-  eq(qk(QC({ cabinFit: 'easy' }).good), ['cabinEasy']);
+  eq([q.maybe, qk(q.good)], [[], ['lowKm']]);
 });
 test('Quick check', 'confirmed deal-breaker → skip; unknown deal-breakers don\'t count', () => {
   eq(qk(QC({ dealBreakers: { lien: 'yes' } }).skip), ['dealBreaker']);
@@ -742,23 +832,23 @@ test('Quick check', 'good signs: 1st hand private, low km (<15,000/yr)', () => {
   eq(QC({ currentKm: 15000, firstRegistration: '2025-11' }).good, []);
 });
 test('Quick check', 'verdict: any skip → Skip; 3 maybes → Skip; 1–2 maybes → Maybe; none → Pursue', () => {
-  eq(QC({ ...KNOWN2, cabinFit: 'tight' }).verdict, 'SKIP');
-  eq(QC({ ...KNOWN2, cabinFit: 'adequate' }).verdict, 'MAYBE');
-  eq(QC({ ...KNOWN2, cabinFit: 'adequate', originalOwnership: 'fleet_lease' }).verdict, 'MAYBE');
-  eq(QC({ ...KNOWN2, cabinFit: 'adequate', originalOwnership: 'fleet_lease', askingPrice: 90000 }).verdict, 'SKIP');
-  eq(QC({ ...KNOWN2, cabinFit: 'easy' }).verdict, 'PURSUE');
+  eq(QC({ ...KNOWN2, originalOwnership: 'rental' }).verdict, 'SKIP');
+  eq(QC({ ...KNOWN2, currentKm: 25000 }).verdict, 'MAYBE');
+  eq(QC({ ...KNOWN2, currentKm: 25000, originalOwnership: 'fleet_lease' }).verdict, 'MAYBE');
+  eq(QC({ ...KNOWN2, currentKm: 25000, originalOwnership: 'fleet_lease', askingPrice: 90000 }).verdict, 'SKIP');
+  eq(QC(KNOWN2).verdict, 'PURSUE');
 });
 test('Quick check', 'reasons: max 3, skip first, then maybe, then good', () => {
-  const q = QC({ cabinFit: 'tight', originalOwnership: 'fleet_lease', askingPrice: 90000, currentKm: 5000, firstRegistration: '2025-11' });
-  eq(q.reasons.map((r) => r.key), ['qc.skip.cabinTight', 'qc.maybe.fleet', 'qc.maybe.noComparison']);
-  const g = QC({ originalOwnership: 'private', handCount: 1, cabinFit: 'easy', currentKm: 5000, firstRegistration: '2025-11', askingPrice: 80000 }, { comparison: CMP100 });
+  const q = QC({ dealBreakers: { lien: 'yes' }, originalOwnership: 'fleet_lease', askingPrice: 90000, currentKm: 5000, firstRegistration: '2025-11' });
+  eq(q.reasons.map((r) => r.key), ['qc.skip.dealBreaker', 'qc.maybe.fleet', 'qc.maybe.noComparison']);
+  const g = QC({ originalOwnership: 'private', handCount: 1, currentKm: 5000, firstRegistration: '2025-11', askingPrice: 80000 }, { comparison: CMP100 });
   eq(g.reasons.map((r) => r.key), ['qc.price.low.saved', 'qc.good.firstHandPrivate', 'qc.good.lowKm']);
 });
 
 test('Quick check', 'every reason, note and source the quick check can produce has EN and HE text', () => {
-  const keys = ['overBudget', 'rental', 'manyHandsYoung', 'highKmYear', 'highTotalKm', 'cabinTight', 'dealBreaker'].map((k) => `qc.skip.${k}`)
-    .concat(['fleet', 'exLease2nd', 'kmYear', 'cabinAdequate', 'noComparison'].map((k) => `qc.maybe.${k}`))
-    .concat(['firstHandPrivate', 'lowKm', 'cabinEasy'].map((k) => `qc.good.${k}`), ['qc.note.askOwnership'])
+  const keys = ['overBudget', 'rental', 'manyHandsYoung', 'highKmYear', 'highTotalKm', 'dealBreaker'].map((k) => `qc.skip.${k}`)
+    .concat(['fleet', 'exLease2nd', 'kmYear', 'noComparison'].map((k) => `qc.maybe.${k}`))
+    .concat(['firstHandPrivate', 'lowKm'].map((k) => `qc.good.${k}`), ['qc.note.askOwnership'])
     .concat(['saved', 'ai', 'levi', 'yad2'].flatMap((s) => [`qc.price.high.${s}`, `qc.price.low.${s}`, `cmp.source.${s}`]))
     .concat(['PURSUE', 'MAYBE', 'SKIP'].map((v) => `qc.verdict.${v}`), ['sort.quick', 'stage.quick', 'stage.full']);
   eq(keys.filter((k) => !STRINGS.en[k] || !STRINGS.he[k]), []);
@@ -836,27 +926,15 @@ test('Seller AI', 'message cleaned; empty → null (template fallback)', () => {
   eq([normalizeMessage({ message: '' }), normalizeMessage(null)], [null, null]);
 });
 
-// ---------------- Model list & registry comparison ----------------
+// ---------------- Names & registry comparison ----------------
 
-const MODELS = [
-  { name: 'Toyota Corolla (sedan)', fit: 'adequate', match: ['corolla', 'קורולה'] },
-  { name: 'Toyota Corolla Cross', fit: 'adequate', match: ['corolla cross', 'קורולה קרוס'] },
-  { name: 'Toyota Corolla Touring Sports', fit: 'easy', match: ['corolla touring', 'corolla ts'] },
-  { name: 'Hyundai i20', fit: 'tight', match: ['i20'] },
-];
-test('Model list', 'longest match wins; Hebrew names work; unknown model → null', () => {
-  eq(matchModel(MODELS, { make: 'Toyota', model: 'Corolla Touring Sports' }).fit, 'easy');
-  eq(matchModel(MODELS, { make: 'טויוטה', model: 'קורולה' }).name, 'Toyota Corolla (sedan)');
-  eq(matchModel(MODELS, { make: 'Toyota', model: 'Corolla', trim: 'TS' }).fit, 'easy');
-  eq([matchModel(MODELS, { make: 'Kia', model: 'Niro' }), matchModel(MODELS, { make: 'Toyota' })], [null, null]);
-});
-test('Model list', 'make/model names across Hebrew and English', () => {
+test('Names', 'make/model names across Hebrew and English', () => {
   eq([canonicalMake('סקודה צ׳כיה'), canonicalMake('Skoda'), canonicalMake('VW')], ['skoda', 'skoda', 'volkswagen']);
   eq(sameName('Toyota', 'טויוטה', { kind: 'make' }), true);
   eq(sameName('Kia', 'טויוטה', { kind: 'make' }), false);
-  eq(sameName('קורולה', 'COROLLA', { kind: 'model', models: MODELS }), true);
-  eq(sameName('Corolla', 'COROLLA CROSS', { kind: 'model', models: MODELS }), null, 'abbreviation: can\'t tell');
-  eq(sameName('i20', 'COROLLA', { kind: 'model', models: MODELS }), false);
+  eq(sameName('Corolla', 'COROLLA', { kind: 'model' }), true);
+  eq(sameName('קורולה', 'COROLLA', { kind: 'model' }), null, 'different scripts: can\'t tell');
+  eq(sameName('i20', 'COROLLA', { kind: 'model' }), false);
   eq(sameName('סאן', 'SUN', { kind: 'trim' }), null, 'different scripts, no table: can\'t tell');
   eq(sameName('Sun', 'SUN PLUS', { kind: 'trim' }), true);
 });
@@ -865,13 +943,13 @@ test('Model list', 'make/model names across Hebrew and English', () => {
 
 const REG = { make: 'טויוטה', model: 'COROLLA', year: 2021, firstRegistration: '2021-03', trim: 'ACTIVE', originalOwnership: 'fleet_lease',
   handCount: 3, testExpiry: '2027-03-14', lastTestKm: 90000, lastTestDate: '2026-01-10' };
-const rowsOf = (car, reg = REG) => Object.fromEntries(comparisonRows(car, reg, { models: MODELS }).map((r) => [r.key, r]));
+const rowsOf = (car, reg = REG) => Object.fromEntries(comparisonRows(car, reg).map((r) => [r.key, r]));
 const status = (car, key, reg) => rowsOf(car, reg)[key].status;
-const codes = (car, ad = {}, reg = REG) => trustIssues(car, { fields: reg, ad }, { models: MODELS }).map((i) => i.code);
+const codes = (car, ad = {}, reg = REG) => trustIssues(car, { fields: reg, ad }).map((i) => i.code);
 
 test('Registry', 'identity fields: registry overwrites silently; differing ad values are remembered', () => {
   const { car, adIdentity } = applyRegistry({ make: 'Toyota', model: 'Corolla', year: 2022, firstRegistration: '2022-01',
-    fieldSources: { year: 'screenshot' } }, REG, { models: MODELS });
+    fieldSources: { year: 'screenshot' } }, REG);
   eq([car.make, car.model, car.year, car.firstRegistration, car.fieldSources.year], ['טויוטה', 'COROLLA', 2021, '2021-03', 'gov']);
   eq(adIdentity, { year: 2022, firstRegistration: '2022-01' }, 'Toyota/טויוטה and Corolla/COROLLA are the same');
 });
@@ -882,7 +960,7 @@ test('Registry', 'compared fields keep the ad value; registry-only facts fill ga
   eq(applyRegistry({ lastTestKm: 50000 }, REG).car.lastTestKm, 50000, 'an existing value is not overwritten');
 });
 test('Registry', 'rows: Field | Ad says | Registry says for owners, ownership, km (+ test date), test, trim', () => {
-  const rows = comparisonRows({ handCount: 3, originalOwnership: 'fleet_lease', currentKm: 95000, testExpiry: '2027-03-01', trim: 'Active' }, REG, { models: MODELS });
+  const rows = comparisonRows({ handCount: 3, originalOwnership: 'fleet_lease', currentKm: 95000, testExpiry: '2027-03-01', trim: 'Active' }, REG);
   eq(rows.map((r) => [r.key, r.ad, r.reg, r.status]), [
     ['handCount', 3, 3, 'match'], ['originalOwnership', 'fleet_lease', 'fleet_lease', 'match'], ['km', 95000, 90000, 'match'],
     ['testExpiry', '2027-03-01', '2027-03-14', 'match'], ['trim', 'Active', 'ACTIVE', 'match']]);

@@ -1,5 +1,5 @@
 // app.js — UI and state. All visible text comes from i18n.js via t().
-import { scoreCar, ENUMS, DEAL_BREAKERS, num } from './scoring.js';
+import { scoreCar, ENUMS, DEAL_BREAKERS, num, RAW_TOTAL } from './scoring.js';
 import { FIELDS, sanitizeCar, cleanValue } from './fields.js';
 import { STRINGS } from './i18n.js';
 import { buildSellerMessage, waLink } from './seller.js';
@@ -9,7 +9,6 @@ import { verdict } from './verdict.js';
 import { summarize } from './summary.js';
 import { formatPlate } from './format.js';
 import { modelKey } from './modelnotes.js';
-import { matchModel } from './modelmatch.js';
 import { applyRegistry, comparisonRows, trustIssues, effectiveCar } from './govcompare.js';
 import { quickCheck, resolveComparison, estimateKey, QUICK_CHECK_UNTIL, VERDICT_ORDER, VERDICT_TONE } from './quickcheck.js';
 
@@ -24,7 +23,6 @@ const SORTS = ['max', 'min', 'date', 'quick'];
 let sort = SORTS.includes(store.get('sort')) ? store.get('sort') : 'max';
 let statusFilter = ENUMS.status.includes(store.get('status')) ? store.get('status') : '';
 let cars = [];          // last list loaded from the API
-let models = [];        // cabin-fit table
 let form = null;        // edit-screen state; survives a language switch
 let carsLoaded = false; // `cars` holds every saved car (needed for price comparables)
 let settings = { budgetCeiling: null };
@@ -233,7 +231,7 @@ const hasFlag = (r) => r.dealBreakers.confirmed.length > 0 || r.warnings.length 
 function quickFor(car, { estimate = car.priceEstimate, pending = false, snapshot = car.registry } = {}) {
   const scored = effectiveCar(car, snapshot?.fields);
   const comparison = resolveComparison(scored, { others: cars, estimate });
-  const trust = trustIssues(car, snapshot, { models });
+  const trust = trustIssues(car, snapshot);
   const qc = quickCheck(scored, { budget: settings.budgetCeiling, comparison: comparison.value ? comparison : null, pending, trust });
   return { qc, comparison, trust };
 }
@@ -345,13 +343,33 @@ async function renderList() {
   list.replaceChildren(h('div.rows', {}, head, ...shown.map(carRow)));
 }
 
+/** Muted line under the title: location · km per year. */
+function rowSub(car, r) {
+  const kpy = r.parts.mileage.kpy;
+  const bits = [];
+  if (car.location) bits.push(h('bdi', { dir: 'auto' }, car.location));
+  if (kpy) {
+    bits.push(h('span.sub-kpy', { title: kpy.estimated ? t('kpy.estimated') : null },
+      ltrNums(t('kpy.value', { n: fmt.format(kpy.value) })), kpy.estimated ? ` (${t('kpy.estShort')})` : ''));
+  }
+  if (!bits.length) return null;
+  return h('span.sub', {}, ...bits.flatMap((b, i) => (i ? [h('span.sep', { 'aria-hidden': 'true' }, ' · '), b] : [b])));
+}
+
+/** "≈ 18,400 km/yr" plus how it was worked out, for the form and the breakdown. */
+function kpyText(kpy) {
+  if (!kpy) return [];
+  const how = kpy.estimated ? t('kpy.estimated') : kpy.toTest ? t('kpy.toTest') : null;
+  return [h('span.kpy-n', {}, ltrNums(t('kpy.value', { n: fmt.format(kpy.value) }))), how ? h('span.kpy-how', {}, ` · ${how}`) : null].filter(Boolean);
+}
+
 function carRow({ car, r, v, qc, trust }) {
   const hl = headline(car, r, v, qc);
   const dash = h('span.muted', {}, '—');
   return h('a.row', { href: `#/edit/${car.id}` },
     h('div.l1', {},
       plateBadge(car.plate),
-      h('span.title', {}, h('bdi', { dir: 'auto' }, carTitle(effectiveCar(car, car.registry?.fields)))),
+      h('span.title', {}, h('bdi', { dir: 'auto' }, carTitle(effectiveCar(car, car.registry?.fields))), rowSub(car, r)),
       hasFlag(r) || trust?.length ? flagIcon(trust?.length ? t('trust.banner') : null) : h('span.flag-slot', { 'aria-hidden': 'true' }),
       h('span.verdict-cell', {}, hl.badge, h('span.stage', {}, t(hl.stage === 'quick' ? 'stage.quickShort' : 'stage.fullShort')))),
     h('div.l2', {},
@@ -404,35 +422,23 @@ async function importJson(e) {
   }
 }
 
-// ---------- model list (cabin fit) ----------
-const suggestFit = (car) => matchModel(models, car);
-
-async function loadModels() {
-  try {
-    const res = await fetch('models.json');
-    models = (await res.json()).models || [];
-  } catch { models = []; }
-}
-
 // ---------- form view ----------
 // Groups in rubric order. `cat` = the scoring category whose points range shows in the header.
 const GROUPS = [
-  { key: 'car', cat: null, fields: ['plate', 'make', 'model', 'trim', 'year', 'status:full', 'listingUrl', 'sellerPhone', 'notes:full'] },
+  { key: 'car', cat: null, fields: ['plate', 'make', 'model', 'trim', 'year', 'location', 'status:full', 'listingUrl', 'sellerPhone', 'notes:full'] },
   { key: 'history', cat: 'history', fields: ['insuranceClaims:full', 'serviceHistory:full'] },
   { key: 'price', cat: 'price', fields: ['askingPrice', 'benchmark'] },
   { key: 'mileage', cat: 'mileage', fields: ['currentKm', 'firstRegistration', 'lastTestKm', 'lastTestDate'] },
   { key: 'ownership', cat: 'ownership', fields: ['originalOwnership:full', 'handCount', 'owners'] },
-  { key: 'cabin', cat: 'cabin', fields: ['cabinFit:full'] },
   { key: 'condition', cat: 'condition', fields: ['testExpiry', 'tires:full'] },
   { key: 'dealBreakers', cat: null, fields: ['dealBreakers'] },
 ];
 
-const SEG_FIELDS = new Set(['insuranceClaims', 'serviceHistory', 'cabinFit', 'tires', 'originalOwnership', 'status']);
+const SEG_FIELDS = new Set(['insuranceClaims', 'serviceHistory', 'tires', 'originalOwnership', 'status']);
 const ENUM_I18N = {
   originalOwnership: 'ownershipType',
   insuranceClaims: 'insuranceClaims',
   serviceHistory: 'serviceHistory',
-  cabinFit: 'cabinFit',
   tires: 'tires',
   status: 'status',
   benchmarkSource: 'bench',
@@ -506,7 +512,6 @@ async function renderForm(id) {
   }
   const draft = form.draft;
   view.classList.add('editing');
-  autoCabin(); // fills cabin fit from the model list when it's unknown (declared below, hoisted)
 
   const panel = h('aside.panel', { 'aria-label': t('panel.title') });
   const sellerBox = h('section.panel-sec.seller');
@@ -516,6 +521,7 @@ async function renderForm(id) {
   const benchBox = h('div.field.full.bench');
   const pointsEls = {};
   const headPlate = h('span.head-plate', {}, plateBadge(draft.plate, 'lg'));
+  const kpyEl = h('span.kpy', { 'aria-live': 'polite' }); // read-only km/year next to the km field
 
   // ----- value display (conflicts) -----
   function displayValue(key, v) {
@@ -550,11 +556,10 @@ async function renderForm(id) {
       } else {
         // Identity fields take the registry value silently; compared fields keep
         // what the ad says and are shown side by side in "Ad vs. registry".
-        const applied = applyRegistry(draft, res.fields, { models });
+        const applied = applyRegistry(draft, res.fields);
         Object.assign(draft, applied.car);
         form.adIdentity = { ...form.adIdentity, ...applied.adIdentity };
-        autoCabin();
-        form.gov = { status: 'done', fields: res.fields, hints: res.hints, extra: res.extra, failed: res.failed };
+          form.gov = { status: 'done', fields: res.fields, hints: res.hints, extra: res.extra, failed: res.failed };
         // Saved car: keep a snapshot so the list can score and flag it without a new lookup.
         if (id) api('POST', '/api/registry', { id, fields: res.fields, ad: form.adIdentity }).catch(() => {});
       }
@@ -638,27 +643,6 @@ async function renderForm(id) {
     return displayValue(key, v);
   }
 
-  // ----- cabin fit from the model list (your own choice always wins) -----
-  function autoCabin() {
-    const src = draft.fieldSources?.cabinFit;
-    if (src === 'manual' || (draft.cabinFit && !src)) return false;
-    const m = suggestFit(draft);
-    const next = m ? m.fit : null;
-    if ((draft.cabinFit || null) === next) return false;
-    const fs = { ...draft.fieldSources };
-    if (next) { draft.cabinFit = next; fs.cabinFit = 'model_list'; } else { draft.cabinFit = null; delete fs.cabinFit; }
-    draft.fieldSources = fs;
-    return true;
-  }
-
-  function refreshField(key, spec) {
-    const old = formEl.querySelector(`[data-field="${key}"]`);
-    if (!old) return;
-    const fresh = fieldEl(spec);
-    old.replaceWith(fresh);
-    fitSegs(fresh);
-  }
-
   // Shared by gov lookup and screenshot import. stateKey: 'gov' | 'shot'.
   const SOURCE_OF = { gov: 'gov', shot: 'screenshot' };
   function resolveConflict(stateKey, c, useTheirs) {
@@ -711,7 +695,6 @@ async function renderForm(id) {
       if (form !== session) return;
       const m = mergeFields(draft, res.fields, 'screenshot');
       Object.assign(draft, m.car);
-      autoCabin();
       form.shot = { status: 'done', files, thumbs, filled: m.filled, conflicts: m.conflicts, noteUntil: Date.now() + 5000 };
       form.pulseKeys = m.filled; // filled fields pulse once after the re-render
     } catch (err) {
@@ -753,7 +736,6 @@ async function renderForm(id) {
     const src = draft.fieldSources?.[key];
     if (src === 'screenshot') return h('span.src-tag', {}, t('src.screenshotTag'));
     if (src === 'gov') return h('span.src-tag.gov', {}, t('src.govTag'));
-    if (src === 'model_list') return h('span.src-tag.gov', {}, t('src.model_listTag'));
     return null;
   }
 
@@ -814,7 +796,7 @@ async function renderForm(id) {
       if (key !== 'status') opts.push(['', t('unknown')]);
       return wrapField(key, mod, seg(key, opts, draft[key] ?? ''));
     }
-    return wrapField(key, mod, textInput(key));
+    return wrapField(key, mod, textInput(key), key === 'currentKm' ? kpyEl : null);
   }
 
   function renderBenchmark() {
@@ -909,7 +891,6 @@ async function renderForm(id) {
     if (name === 'handCount') renderOwners();
     if (name === 'benchmarkSource') { renderBenchmark(); fitSegs(benchBox); }
     if (name === 'plate') { headPlate.replaceChildren(plateBadge(draft.plate, 'lg')); scheduleGov(); }
-    if (['make', 'model', 'trim'].includes(name) && autoCabin()) refreshField('cabinFit', 'cabinFit:full');
     renderPanel();
   }
 
@@ -1101,8 +1082,11 @@ async function renderForm(id) {
     }
     const { qc, comparison, est, trust } = cq;
     renderSeller(car, qc);
-    renderVs(snapshot ? comparisonRows(car, snapshot.fields, { models }) : []);
+    renderVs(snapshot ? comparisonRows(car, snapshot.fields) : []);
     const quickStage = r.coverage < QUICK_CHECK_UNTIL;
+    const kpy = r.parts.mileage.kpy;
+    kpyEl.replaceChildren(...kpyText(kpy));
+    kpyEl.hidden = !kpy;
 
     // Group headers: category points range, e.g. 18–25 / 25.
     for (const g of GROUPS) {
@@ -1197,9 +1181,9 @@ async function renderForm(id) {
 
     // 6. Score breakdown (collapsed by default) + notes.
     const rows = Object.entries(r.parts).map(([k, p]) => h('tr', {},
-      h('td', {}, t(`part.${k}`)),
+      h('td', {}, t(`part.${k}`), k === 'mileage' && kpy ? h('div.kpy', {}, ...kpyText(kpy)) : null),
       h('td', {}, ltr(`${p.min === p.max ? p.min : `${p.min}–${p.max}`} / ${p.weight}`))));
-    const breakdown = [h('table.breakdown', {}, h('tbody', {}, rows)), ...r.notes.map((n) => h('div.note', { style: 'margin-top:8px' }, t(`note.${n}`)))];
+    const breakdown = [h('table.breakdown', {}, h('tbody', {}, rows)), h('div.note', { style: 'margin-top:8px' }, ltrNums(t('breakdown.scaled', { raw: RAW_TOTAL }))), ...r.notes.map((n) => h('div.note', { style: 'margin-top:8px' }, t(`note.${n}`)))];
     sections.push(h('section.panel-sec', {}, disclose('breakdownOpen', t('breakdown'), '', breakdown)));
 
     // From 50%: the quick check is available collapsed, then the seller message.
@@ -1382,5 +1366,4 @@ async function copyText(text, textarea) {
 
 // ---------- boot ----------
 applyLang();
-loadModels().then(() => { if (form) route(); });
 loadSettings().finally(route);

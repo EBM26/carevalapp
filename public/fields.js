@@ -3,7 +3,7 @@
 
 import { ENUMS, DEAL_BREAKERS, num } from './scoring.js';
 
-export const SOURCES = ['manual', 'screenshot', 'gov', 'seller', 'model_list'];
+export const SOURCES = ['manual', 'screenshot', 'gov', 'seller'];
 
 // [key, column, type, arg]
 export const FIELDS = [
@@ -12,6 +12,7 @@ export const FIELDS = [
   ['model', 'model', 'text'],
   ['trim', 'trim', 'text'],
   ['year', 'year', 'int'],
+  ['location', 'location', 'text', 100],
   ['firstRegistration', 'first_registration', 'ym'],
   ['currentKm', 'current_km', 'int'],
   ['lastTestKm', 'last_test_km', 'int'],
@@ -27,7 +28,6 @@ export const FIELDS = [
   ['testExpiry', 'test_expiry', 'date'],
   ['insuranceClaims', 'insurance_claims', 'enum', ENUMS.insuranceClaims],
   ['serviceHistory', 'service_history', 'enum', ENUMS.serviceHistory],
-  ['cabinFit', 'cabin_fit', 'enum', ENUMS.cabinFit],
   ['tires', 'tires', 'enum', ENUMS.tires],
   ['govStructuralChange', 'gov_structural_change', 'bool'],
   ['notes', 'notes', 'text', 5000],

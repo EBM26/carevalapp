@@ -171,7 +171,8 @@ await test('stored score columns use registry values when a snapshot exists', as
   const car = { firstRegistration: '2023-01', handCount: 1, originalOwnership: 'private', dealBreakers: {} };
   const plain = scoreColumns(car);
   const withReg = scoreColumns({ ...car, registry: { fields: { handCount: 3, originalOwnership: 'private' } } });
-  eq([plain.score_max - withReg.score_max], [15], '3 registered hands on a young car → ownership 0 instead of 15');
+  // raw 94 → 100; ownership 15 → 0 gives raw 79 → 84 (scaled ×100/94)
+  eq([plain.score_max, withReg.score_max], [100, 84], '3 registered hands on a young car → ownership 0 instead of 15');
 });
 await test('/api/registry: stores the ad\'s differing identity claims next to the registry fields', async () => {
   const DB = fakeDb(1);
