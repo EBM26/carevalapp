@@ -196,22 +196,22 @@ The production database is managed through the D1 console. For a new column:
 ## What happens automatically on the edit screen
 
 - **Cabin fit** is set from `public/models.json` as soon as make and model are known (from a screenshot, typing or the registry), tagged "From model list". If you pick it yourself, your choice is never overwritten. Models that aren't in the table stay Unknown.
-- **Registry lookup** runs 600 ms after the plate becomes valid. It fills empty fields silently, and compares make, model, year, trim, original ownership, hand count and test date with what the ad or you entered. Differences show under the field with buttons to choose, and in "Watch out". Hebrew/English names (e.g. סקודה / Skoda) are matched through the model list and a make table; when the app can't tell, it doesn't flag. Ad km below the last-test km stays a red odometer warning.
+- **Registry lookup** runs 600 ms after the plate becomes valid. Make, model, year and first registration take the registry value silently. Owners, original ownership, km, test date and trim keep what the ad (or you) said, and an **"Ad vs. registry"** table shows both side by side with ✓ match, ≠ differs, ⚠ suspicious or – unknown. **Scoring uses the registry value wherever there is one**; for km, the higher of ad km and last-test km. (If you chose private/fleet lease and the registry just says lease, your choice is kept.)
 - **Loading states:** screenshots show thumbnails with a shimmer while being read; the price estimate, seller message and known issues each show a skeleton with a short label. With "reduce motion" turned on, these show a static "Working…" instead.
 
 ## Seller trust
 
-Defined in `public/govcompare.js`. A registry difference is **suspicious** only when the ad makes the car look better than the registry:
+Defined in `public/govcompare.js`. A row in "Ad vs. registry" is **suspicious** (⚠) only when the ad makes the car look better than the registry:
 
-- fewer hands than registered
+- fewer owners than registered
 - "private" when the registry says lease, fleet, rental or driving school
-- ad km lower than the last-test km
-- a newer year than registered
-- a clearly higher trim: the ad adds "Plus" to the registered trim, or uses a higher tier word (e.g. Premium/Luxury/Executive above Comfort/Style above Base/Active, Hebrew included)
+- ad km below the last-test km
+- a clearly higher trim (the ad adds "Plus", or uses a higher tier word: Premium/Luxury/Executive above Comfort/Style above Base/Active, Hebrew included)
+- also a newer year than registered (year isn't a row; the registry year is used, but the ad's claim is remembered for this check)
 
-Other differences (other trim differences, a test date a few weeks off, more hands than registered, an older year) are normal inline conflicts. Ad km higher than the last-test km is expected and isn't flagged.
+Other differences (more owners, other ownership differences, lower or unrecognised trims, a test date in a different month) are neutral (≠). Ad km at or above the last-test km is a match.
 
-With at least one suspicious difference, a red "Ad doesn't match the registry" banner tops the score panel and the car gets a red flag in the list (needs migration `0004`). The quick check adds a Maybe reason for one, and says Skip for two or more. The seller message (AI or template) asks one polite question about each.
+With at least one suspicious row: a red "Ad doesn't match the registry" banner tops the score panel, the car gets a red flag in the list, the quick check adds a Maybe reason (two or more: Skip), and the seller message (AI or template) asks one polite question about each. The list needs migration `0004` to know a car's registry data.
 
 ## Quick check rules
 

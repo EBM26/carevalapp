@@ -1,29 +1,36 @@
-// govcompare.js — compare registry (gov) data with what the ad or the user
-// says, and decide which differences are suspicious. Pure.
+// govcompare.js — the ad vs. the registry (gov data). Pure.
 //
-// Only flags a mismatch when we're confident the two disagree. A mismatch is
-// "suspicious" (seller trust) when the ad makes the car look better than the
-// registry does:
-//   fewerHands  fewer hands than registered
-//   ownership   "private" when the registry says lease, fleet, rental or driving school
-//   odometer    ad km lower than the last-test km
-//   newerYear   a newer year than registered
-//   higherTrim  a higher trim than registered (only when clearly higher)
-// Everything else (other trim differences, test date off by a few weeks,
-// more hands than registered, …) is a neutral conflict.
+// Identity fields (make, model, year, first registration): the registry value
+// fills or overwrites the car silently. If the ad said something different it
+// is remembered only so a "better-looking" claim (a newer year) can count
+// against seller trust.
+//
+// Compared fields (owners, original ownership, km, test date, trim) keep what
+// the ad / the user said; the registry values are stored next to them (the
+// car's registry snapshot) and shown side by side. Each row gets a status:
+//   match       the two agree (for km: ad km at or above the last-test km)
+//   neutral     they differ, but not in the car's favour
+//   suspicious  the ad makes the car look better than the registry
+//   unknown     one side is missing
+//
+// Scoring uses the registry value whenever it exists (effectiveCar).
 
 import { cleanValue, FIELDS } from './fields.js';
 import { num } from './scoring.js';
 import { sameName } from './modelmatch.js';
 
-export const COMPARE_KEYS = ['make', 'model', 'year', 'trim', 'originalOwnership', 'handCount', 'testExpiry'];
+export const IDENTITY_KEYS = ['make', 'model', 'year', 'firstRegistration'];
+export const ROW_KEYS = ['handCount', 'originalOwnership', 'km', 'testExpiry', 'trim'];
 export const TRUST_CODES = ['fewerHands', 'ownership', 'odometer', 'newerYear', 'higherTrim'];
-// Registry fields kept per car (so the list can show trust flags without a new lookup).
-export const SNAPSHOT_KEYS = [...COMPARE_KEYS, 'lastTestKm', 'lastTestDate'];
+// Registry-only facts copied into the car when it doesn't have them.
+const REGISTRY_ONLY = ['lastTestKm', 'lastTestDate', 'govStructuralChange', 'ownershipHistory'];
+// Registry fields kept per car (the snapshot).
+export const SNAPSHOT_KEYS = [...IDENTITY_KEYS, 'trim', 'originalOwnership', 'handCount', 'testExpiry', 'lastTestKm', 'lastTestDate'];
 
 const FIELD = Object.fromEntries(FIELDS.map((f) => [f.key, f]));
 const LEASE = new Set(['private_lease', 'fleet_lease']);
-const valueKey = (v) => JSON.stringify(v);
+const NOT_PRIVATE = new Set(['private_lease', 'fleet_lease', 'rental', 'driving_school']);
+const clean = (key, v) => cleanValue(FIELD[key].type, v, FIELD[key].arg);
 const norm = (s) => String(s || '').toLowerCase().replace(/[\s'"׳״\-_.&]/g, '');
 
 // ---------- trim tiers (generic; only used to spot a clearly higher trim) ----------
@@ -49,73 +56,147 @@ export function isHigherTrim(ad, reg) {
   const a = norm(ad);
   const r = norm(reg);
   if (!a || !r || a === r) return false;
-  // "Sun Plus" / "Sun+" when the registry says "SUN"
   if (a === `${r}plus` || String(ad).trim().toLowerCase() === `${String(reg).trim().toLowerCase()}+`) return true;
   const ta = trimTier(ad);
   const tr = trimTier(reg);
   return ta !== null && tr !== null && ta > tr;
 }
 
+/** Trims match when one's words are all part of the other's ("Sun" ~ "SUN"; "LE" ≠ "XLE"). */
+function sameTrim(a, b) {
+  const words = (x) => String(x).toLowerCase().split(/[\s/,+\-]+/).map(norm).filter(Boolean);
+  const wa = words(a);
+  const wb = words(b);
+  return wa.every((w) => wb.includes(w)) || wb.every((w) => wa.includes(w));
+}
+
+/** What the ad (or the user) says for a field; values that came from the registry don't count. */
+export function adValue(car, key) {
+  if (car.fieldSources?.[key] === 'gov') return null;
+  return clean(key, car[key]);
+}
+
+// ---------- applying registry data to the car ----------
+
 /**
- * car: the current car (form draft). gov: registry fields.
- * resolved: { [key]: valueKey(gov value) } for mismatches the user already
- * settled by keeping their own value.
- * Returns [{ key, mine, gov, suspicious: code | null, odometer? }].
+ * Registry data arrives: identity fields are overwritten silently, registry-only
+ * facts fill gaps; compared fields are left alone. Returns { car, adIdentity }
+ * where adIdentity holds the ad's own identity values that differed.
  */
-export function registryMismatches(car, gov, { models = [], resolved = {} } = {}) {
-  if (!gov) return [];
-  const out = [];
-  for (const key of COMPARE_KEYS) {
-    const f = FIELD[key];
-    const mine = cleanValue(f.type, car[key], f.arg);
-    const theirs = gov[key];
-    if (mine === null || theirs === null || theirs === undefined) continue;
-    if (resolved[key] === valueKey(theirs)) continue;
-    let same;
-    let suspicious = null;
-    if (key === 'trim' && isHigherTrim(mine, theirs)) {
-      same = false;
-      suspicious = 'higherTrim';
-    } else if (key === 'make' || key === 'model' || key === 'trim') {
-      same = sameName(mine, theirs, { kind: key, models, make: car.make });
-      if (same === null) continue; // can't tell: don't flag
-    } else if (key === 'originalOwnership') {
-      // The registry can't tell private lease from fleet lease.
-      same = mine === theirs || (LEASE.has(mine) && LEASE.has(theirs));
-      if (!same && mine === 'private') suspicious = 'ownership';
-    } else if (key === 'testExpiry') {
-      same = String(mine).slice(0, 7) === String(theirs).slice(0, 7); // ads often give only the month
-    } else {
-      same = num(mine) === num(theirs);
-      if (!same && key === 'handCount' && num(mine) < num(theirs)) suspicious = 'fewerHands';
-      if (!same && key === 'year' && num(mine) > num(theirs)) suspicious = 'newerYear';
+export function applyRegistry(car, gov, { models = [] } = {}) {
+  const out = { ...car, fieldSources: { ...(car.fieldSources || {}) } };
+  const adIdentity = {};
+  for (const key of IDENTITY_KEYS) {
+    const theirs = clean(key, gov?.[key]);
+    if (theirs === null) continue;
+    const mine = adValue(car, key);
+    if (mine !== null) {
+      const same = key === 'make' || key === 'model'
+        ? sameName(mine, theirs, { kind: key, models, make: car.make }) !== false
+        : String(mine) === String(theirs);
+      if (!same) adIdentity[key] = mine;
     }
-    if (!same) out.push({ key, mine, gov: theirs, suspicious });
+    out[key] = theirs;
+    out.fieldSources[key] = 'gov';
   }
-  const km = num(car.currentKm);
-  const testKm = num(gov.lastTestKm);
-  if (km !== null && testKm !== null && km < testKm && resolved.currentKm !== valueKey(testKm)) {
-    out.push({ key: 'currentKm', mine: km, gov: testKm, odometer: true, suspicious: 'odometer' });
+  for (const key of REGISTRY_ONLY) {
+    const v = gov?.[key];
+    const empty = out[key] === null || out[key] === undefined || out[key] === '' || (Array.isArray(out[key]) && !out[key].length);
+    if (v !== null && v !== undefined && empty) {
+      out[key] = v;
+      out.fieldSources[key] = 'gov';
+    }
   }
+  return { car: out, adIdentity };
+}
+
+// ---------- the side-by-side rows ----------
+
+/**
+ * car: the car (ad / manual values). reg: registry fields.
+ * Returns [{ key, ad, reg, regDate?, status, code? }] in ROW_KEYS order.
+ */
+export function comparisonRows(car, reg, { models = [] } = {}) {
+  if (!reg) return [];
+  const rows = [];
+  const row = (key, ad, regV, judge, extra = {}) => {
+    const r = { key, ad, reg: regV, ...extra };
+    if (ad === null || ad === undefined || regV === null || regV === undefined) r.status = 'unknown';
+    else Object.assign(r, judge(ad, regV));
+    rows.push(r);
+  };
+  row('handCount', adValue(car, 'handCount'), clean('handCount', reg.handCount), (a, g) => (
+    a === g ? { status: 'match' } : a < g ? { status: 'suspicious', code: 'fewerHands' } : { status: 'neutral' }));
+  row('originalOwnership', adValue(car, 'originalOwnership'), clean('originalOwnership', reg.originalOwnership), (a, g) => {
+    if (a === g || (LEASE.has(a) && LEASE.has(g))) return { status: 'match' }; // the registry can't tell lease kinds apart
+    if (a === 'private' && NOT_PRIVATE.has(g)) return { status: 'suspicious', code: 'ownership' };
+    return { status: 'neutral' };
+  });
+  row('km', adValue(car, 'currentKm'), clean('lastTestKm', reg.lastTestKm), (a, g) => (
+    a < g ? { status: 'suspicious', code: 'odometer' } : { status: 'match' }), { regDate: clean('lastTestDate', reg.lastTestDate) });
+  row('testExpiry', adValue(car, 'testExpiry'), clean('testExpiry', reg.testExpiry), (a, g) => (
+    // ads often give only the month
+    a.slice(0, 7) === g.slice(0, 7) ? { status: 'match' } : { status: 'neutral' }));
+  row('trim', adValue(car, 'trim'), clean('trim', reg.trim), (a, g) => {
+    if (isHigherTrim(a, g)) return { status: 'suspicious', code: 'higherTrim' };
+    return sameTrim(a, g) ? { status: 'match' } : { status: 'neutral' };
+  });
+  return rows;
+}
+
+/**
+ * Seller-trust issues from the rows plus the ad's identity claims:
+ * [{ code, key, ad, gov }]. A newer year in the ad also counts.
+ */
+export function trustIssues(car, snapshot, { models = [] } = {}) {
+  const reg = snapshot?.fields;
+  if (!reg) return [];
+  const out = comparisonRows(car, reg, { models })
+    .filter((r) => r.status === 'suspicious')
+    .map((r) => ({ code: r.code, key: r.key, ad: r.ad, gov: r.reg }));
+  const adYear = num(snapshot.ad?.year);
+  const regYear = num(reg.year);
+  if (adYear !== null && regYear !== null && adYear > regYear) out.unshift({ code: 'newerYear', key: 'year', ad: adYear, gov: regYear });
   return out;
 }
 
-/** Only the suspicious mismatches: [{ code, key, ad, gov }]. */
-export function trustIssues(car, gov, opts) {
-  return registryMismatches(car, gov, opts)
-    .filter((m) => m.suspicious)
-    .map((m) => ({ code: m.suspicious, key: m.key, ad: m.mine, gov: m.gov }));
+// ---------- scoring input ----------
+
+/**
+ * The car as scored: registry values win wherever they exist; for km the
+ * higher of ad km and last-test km. Lease kinds: the registry only knows
+ * "lease", so a private/fleet lease the user chose is kept.
+ */
+export function effectiveCar(car, reg) {
+  if (!reg) return car;
+  const out = { ...car };
+  for (const key of [...IDENTITY_KEYS, 'handCount', 'testExpiry', 'trim', 'lastTestKm', 'lastTestDate']) {
+    const v = reg[key];
+    if (v !== null && v !== undefined && v !== '') out[key] = v;
+  }
+  if (reg.originalOwnership) {
+    out.originalOwnership = LEASE.has(reg.originalOwnership) && LEASE.has(car.originalOwnership)
+      ? car.originalOwnership : reg.originalOwnership;
+  }
+  const adKm = num(car.currentKm);
+  const testKm = num(reg.lastTestKm);
+  if (adKm !== null && testKm !== null) out.currentKm = Math.max(adKm, testKm);
+  return out;
 }
 
-/** Clean a registry snapshot (from /api/gov) for storage: known keys, valid values only. */
-export function cleanSnapshot(fields) {
-  const out = {};
+// ---------- storage ----------
+
+/** Clean a registry snapshot for storage: { fields, ad } with known keys and valid values only. */
+export function cleanSnapshot(fields, ad = {}) {
+  const f = {};
   for (const k of SNAPSHOT_KEYS) {
-    const f = FIELD[k];
-    const v = cleanValue(f.type, fields?.[k], f.arg);
-    if (v !== null) out[k] = v;
+    const v = clean(k, fields?.[k]);
+    if (v !== null) f[k] = v;
   }
-  return out;
+  const a = {};
+  for (const k of IDENTITY_KEYS) {
+    const v = clean(k, ad?.[k]);
+    if (v !== null) a[k] = v;
+  }
+  return { fields: f, ad: a };
 }
-
-export { valueKey };

@@ -3,14 +3,14 @@ import { scoreCar, ENUMS, DEAL_BREAKERS, num } from './scoring.js';
 import { FIELDS, sanitizeCar, cleanValue } from './fields.js';
 import { STRINGS } from './i18n.js';
 import { buildSellerMessage, waLink } from './seller.js';
-import { mergeGov, mergeFields } from './govmap.js';
+import { mergeFields } from './govmap.js';
 import { MAX_IMAGES } from './extraction.js';
 import { verdict } from './verdict.js';
 import { summarize } from './summary.js';
 import { formatPlate } from './format.js';
 import { modelKey } from './modelnotes.js';
 import { matchModel } from './modelmatch.js';
-import { registryMismatches, valueKey, trustIssues } from './govcompare.js';
+import { applyRegistry, comparisonRows, trustIssues, effectiveCar } from './govcompare.js';
 import { quickCheck, resolveComparison, estimateKey, QUICK_CHECK_UNTIL, VERDICT_ORDER, VERDICT_TONE } from './quickcheck.js';
 
 // ---------- storage (per-device conveniences only; D1 is the source of truth) ----------
@@ -173,7 +173,12 @@ function route() {
   if (m) return renderForm(m[1]);
   return renderList();
 }
-window.addEventListener('hashchange', () => { form = null; route(); });
+window.addEventListener('hashchange', () => {
+  // Leaving the form: cancel its pending timers so nothing runs against a closed form.
+  if (form) { clearTimeout(form.estTimer); clearTimeout(form.govTimer); }
+  form = null;
+  route();
+});
 
 // ---------- shared pieces ----------
 function carTitle(car) {
@@ -225,15 +230,13 @@ const hasFlag = (r) => r.dealBreakers.confirmed.length > 0 || r.warnings.length 
 
 // ---------- quick check (stage 1) ----------
 /** Quick check for a car against the other saved cars and its cached AI estimate. */
-function quickFor(car, { estimate = car.priceEstimate, pending = false, trust } = {}) {
-  const comparison = resolveComparison(car, { others: cars, estimate });
-  const tr = trust ?? carTrust(car, car.registry?.fields);
-  const qc = quickCheck(car, { budget: settings.budgetCeiling, comparison: comparison.value ? comparison : null, pending, trust: tr });
-  return { qc, comparison, trust: tr };
+function quickFor(car, { estimate = car.priceEstimate, pending = false, snapshot = car.registry } = {}) {
+  const scored = effectiveCar(car, snapshot?.fields);
+  const comparison = resolveComparison(scored, { others: cars, estimate });
+  const trust = trustIssues(car, snapshot, { models });
+  const qc = quickCheck(scored, { budget: settings.budgetCeiling, comparison: comparison.value ? comparison : null, pending, trust });
+  return { qc, comparison, trust };
 }
-
-/** Suspicious registry mismatches (seller trust) for a car and registry fields. */
-const carTrust = (car, regFields, resolved) => (regFields ? trustIssues(car, regFields, { models, resolved }) : []);
 
 const reasonText = (r, l = lang) => tIn(l, r.key, r.vars);
 const qcLabel = (qc) => t(`qc.verdict.${qc.verdict}`);
@@ -322,7 +325,7 @@ async function renderList() {
   }
   let shown = statusFilter ? cars.filter((c) => c.status === statusFilter) : cars.slice();
   const rowsData = shown.map((car) => {
-    const r = scoreCar(car);
+    const r = scoreCar(effectiveCar(car, car.registry?.fields)); // registry values win
     return { car, r, v: verdict(r), ...quickFor(car) };
   });
   if (sort === 'quick') {
@@ -348,7 +351,7 @@ function carRow({ car, r, v, qc, trust }) {
   return h('a.row', { href: `#/edit/${car.id}` },
     h('div.l1', {},
       plateBadge(car.plate),
-      h('span.title', {}, h('bdi', { dir: 'auto' }, carTitle(car))),
+      h('span.title', {}, h('bdi', { dir: 'auto' }, carTitle(effectiveCar(car, car.registry?.fields)))),
       hasFlag(r) || trust?.length ? flagIcon(trust?.length ? t('trust.banner') : null) : h('span.flag-slot', { 'aria-hidden': 'true' }),
       h('span.verdict-cell', {}, hl.badge, h('span.stage', {}, t(hl.stage === 'quick' ? 'stage.quickShort' : 'stage.fullShort')))),
     h('div.l2', {},
@@ -489,7 +492,7 @@ async function renderForm(id) {
       draft = structuredClone(car);
     }
     // Seller message language defaults to Hebrew regardless of the UI language.
-    form = { id, draft, sellerLang: 'he', notes: null, seller: { status: 'idle', text: '', version: 0 }, estimate: null, gov: null, govPlate: null, govResolved: {} };
+    form = { id, draft, sellerLang: 'he', notes: null, seller: { status: 'idle', text: '', version: 0 }, estimate: null, gov: null, govPlate: null, adIdentity: { ...(draft.registry?.ad || {}) } };
     if (draft.registry?.fields) form.gov = { status: 'done', fields: draft.registry.fields, stored: true };
     const ek = estimateKey(draft);
     if (draft.priceEstimate && ek && draft.priceEstimate.key === ek) {
@@ -529,7 +532,7 @@ async function renderForm(id) {
     clearTimeout(form.govTimer);
     const plate = cleanValue('plate', draft.plate);
     if (!plate || plate === form.govPlate) return;
-    form.govTimer = setTimeout(() => form.fetchGov(), 600);
+    form.govTimer = setTimeout(() => form?.fetchGov(), 600);
   }
 
   async function fetchGov(force = false) {
@@ -545,12 +548,15 @@ async function renderForm(id) {
       if (!res.found) {
         form.gov = { status: res.failed?.length === 3 ? 'error' : 'notFound' };
       } else {
-        // Registry values fill empty fields silently; differences show inline.
-        Object.assign(draft, mergeGov(draft, res.fields).car);
+        // Identity fields take the registry value silently; compared fields keep
+        // what the ad says and are shown side by side in "Ad vs. registry".
+        const applied = applyRegistry(draft, res.fields, { models });
+        Object.assign(draft, applied.car);
+        form.adIdentity = { ...form.adIdentity, ...applied.adIdentity };
         autoCabin();
         form.gov = { status: 'done', fields: res.fields, hints: res.hints, extra: res.extra, failed: res.failed };
-        // Saved car: keep a snapshot so the list can show seller-trust flags.
-        if (id) api('POST', '/api/registry', { id, fields: res.fields }).catch(() => {});
+        // Saved car: keep a snapshot so the list can score and flag it without a new lookup.
+        if (id) api('POST', '/api/registry', { id, fields: res.fields, ad: form.adIdentity }).catch(() => {});
       }
     } catch {
       if (form !== session) return;
@@ -581,48 +587,55 @@ async function renderForm(id) {
     if (refresh) refresh.hidden = busy || !['done', 'notFound', 'error'].includes(g.status);
   }
 
-  // ----- registry mismatches, shown inline under each field -----
-  function mmValue(key, v) {
+  // ----- "Ad vs. registry": side-by-side comparison -----
+  const vsBox = h('section.group.vs', { id: 'grp-vs', 'aria-labelledby': 'h-vs', hidden: true });
+  const fmtDate = (d) => new Intl.DateTimeFormat(lang === 'he' ? 'he-IL' : 'en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
+    .format(new Date(`${d}T00:00:00Z`));
+
+  function vsValue(key, v, side, row) {
+    if (v === null || v === undefined || v === '') return h('span.muted', {}, '–');
     if (key === 'handCount') return Number(v) === 1 ? t('mm.handOne') : t('mm.hands', { n: v });
-    if (key === 'testExpiry') return String(v).slice(0, 7);
-    return displayValue(key, v);
+    if (key === 'originalOwnership') {
+      // the registry only knows "lease", not which kind
+      if (side === 'reg' && v === 'fleet_lease') return t('vs.leaseOrFleet');
+      return t(`ownershipType.${v}`);
+    }
+    if (key === 'km') {
+      const km = `${fmt.format(v)} ${t('unit.km')}`;
+      if (side === 'reg') return ltrNums(row.regDate ? t('vs.kmAtTest', { km, date: fmtDate(row.regDate) }) : t('vs.kmAtLastTest', { km }));
+      return ltr(km);
+    }
+    if (key === 'testExpiry') return fmtDate(v);
+    return h('bdi', { dir: 'auto' }, String(v));
+  }
+
+  const STATUS_ICON = { match: '✓', neutral: '≠', suspicious: '⚠', unknown: '–' };
+
+  function renderVs(rows) {
+    vsBox.hidden = !rows.length;
+    if (!rows.length) { vsBox.replaceChildren(); return; }
+    vsBox.replaceChildren(
+      h('div.group-head', {}, h('h2', { id: 'h-vs' }, t('vs.title'))),
+      h('div.vs-table', { role: 'table', 'aria-labelledby': 'h-vs' },
+        h('div.vs-row.vs-head', { role: 'row' },
+          h('span', { role: 'columnheader' }, t('vs.field')),
+          h('span', { role: 'columnheader' }, t('vs.ad')),
+          h('span', { role: 'columnheader' }, t('vs.registry'))),
+        rows.map((row) => h(`div.vs-row.${row.status}`, { role: 'row' },
+          h('span.vs-field', { role: 'rowheader' },
+            h(`span.vs-icon.${row.status}`, { role: 'img', 'aria-label': t(`vs.status.${row.status}`), title: t(`vs.status.${row.status}`) }, STATUS_ICON[row.status]),
+            t(`vs.row.${row.key}`)),
+          h('span.vs-val', { role: 'cell', 'data-label': t('vs.ad') }, vsValue(row.key, row.ad, 'ad', row)),
+          h('span.vs-val', { role: 'cell', 'data-label': t('vs.registry') }, vsValue(row.key, row.reg, 'reg', row)),
+          row.status === 'suspicious' ? h('span.vs-why', { role: 'cell' }, t('vs.status.suspicious')) : null))),
+      h('p.vs-note', {}, t('vs.note')));
   }
 
   function trustValue(key, v) {
-    if (key === 'currentKm') return `${fmt.format(v)} ${t('unit.km')}`;
-    return mmValue(key, v);
-  }
-
-  function renderMismatches(list) {
-    formEl.querySelectorAll('.mm').forEach((el) => { el.replaceChildren(); el.classList.remove('suspicious'); });
-    for (const m of list) {
-      const slot = formEl.querySelector(`.mm[data-mm="${m.key}"]`);
-      if (!slot) continue;
-      if (m.odometer) {
-        slot.classList.add('suspicious');
-        slot.replaceChildren(h('span.mm-flag', {}, ICON.alert(), t('mm.suspicious')),
-          h('div.mm-line.bad', {}, ltrNums(t('mm.odometer', { ad: fmt.format(m.mine), gov: fmt.format(m.gov) }))));
-        continue;
-      }
-      const fromAd = draft.fieldSources?.[m.key] === 'screenshot';
-      slot.classList.toggle('suspicious', Boolean(m.suspicious));
-      slot.replaceChildren(
-        m.suspicious ? h('span.mm-flag', {}, ICON.alert(), t('mm.suspicious')) : null,
-        h('div.mm-line', {},
-          h('span', {}, t(fromAd ? 'mm.ad' : 'mm.you'), ': ', h('bdi', { dir: 'auto' }, mmValue(m.key, m.mine))),
-          ' · ',
-          h('span', {}, t('mm.registry'), ': ', h('bdi', { dir: 'auto' }, mmValue(m.key, m.gov)))),
-        h('div.mm-actions', {},
-          h('button.btn.small', { type: 'button', onclick: () => {
-            form.govResolved = { ...form.govResolved, [m.key]: valueKey(m.gov) };
-            renderPanel();
-          } }, t(fromAd ? 'mm.keepAd' : 'mm.keepMine')),
-          h('button.btn.small', { type: 'button', onclick: () => {
-            draft[m.key] = m.gov;
-            draft.fieldSources = { ...draft.fieldSources, [m.key]: 'gov' };
-            renderForm(id);
-          } }, t('mm.useRegistry'))));
-    }
+    if (key === 'km') return `${fmt.format(v)} ${t('unit.km')}`;
+    if (key === 'handCount') return Number(v) === 1 ? t('mm.handOne') : t('mm.hands', { n: v });
+    if (key === 'originalOwnership') return v === 'fleet_lease' ? t('vs.leaseOrFleet') : t(`ownershipType.${v}`);
+    return displayValue(key, v);
   }
 
   // ----- cabin fit from the model list (your own choice always wins) -----
@@ -758,8 +771,7 @@ async function renderForm(id) {
       h('span.label', { id: labelId }, t(`field.${key}`), srcTag(key)),
       control,
       HINTS[key] ? h('span.hint', {}, t(HINTS[key])) : null,
-      extra || null,
-      h('div.mm', { 'data-mm': key, 'aria-live': 'polite' }));
+      extra || null);
   }
 
   function textInput(key) {
@@ -853,7 +865,9 @@ async function renderForm(id) {
   };
 
   const formEl = h('form', { novalidate: true, onsubmit: (e) => { e.preventDefault(); save(); } },
-    groupEls,
+    groupEls[0],
+    vsBox,
+    groupEls.slice(1),
     h('div.form-actions', {},
       saveBtn(),
       h('a.btn', { href: '#/' }, t('cancel')),
@@ -927,7 +941,7 @@ async function renderForm(id) {
 
   async function fetchEstimate(car, key) {
     const session = form;
-    if (form.estimate?.key !== key || form.estimate.status !== 'scheduled') return;
+    if (!form || form.estimate?.key !== key || form.estimate.status !== 'scheduled') return;
     form.estimate = { key, status: 'loading' };
     form.rerender();
     try {
@@ -1021,8 +1035,12 @@ async function renderForm(id) {
     const est = form.estimate && form.estimate.key === key ? form.estimate : null;
     const pending = Boolean(est && (est.status === 'scheduled' || est.status === 'loading'));
     // buildCar() strips the id; keep it so the car isn't counted as its own comparable.
-    const trust = carTrust(draft, form.gov?.fields, form.govResolved);
-    return { ...quickFor({ ...car, id }, { estimate: est?.status === 'done' ? est : null, pending, trust }), est, key };
+    return { ...quickFor({ ...car, id }, { estimate: est?.status === 'done' ? est : null, pending, snapshot: currentSnapshot() }), est, key };
+  }
+
+  /** Registry snapshot for this form: live lookup (or the stored one) + the ad's identity claims. */
+  function currentSnapshot() {
+    return form.gov?.fields ? { fields: form.gov.fields, ad: form.adIdentity } : null;
   }
 
   function quickSection(car, qc, comparison, est, asHeadline) {
@@ -1069,9 +1087,11 @@ async function renderForm(id) {
   // ----- score panel -----
   function renderPanel() {
     const car = buildCar(draft);
-    const r = scoreCar(car);
+    const snapshot = currentSnapshot();
+    const scored = effectiveCar(car, snapshot?.fields); // registry values win; km = max(ad, last test)
+    const r = scoreCar(scored);
     const v = verdict(r);
-    const s = summarize(car, r);
+    const s = summarize(scored, r);
     let cq = currentQuick(car);
     // Ask the AI for a rough price only when it would be used: asking price known,
     // no benchmark entered, fewer than 3 comparables, nothing cached for this key.
@@ -1079,12 +1099,9 @@ async function renderForm(id) {
       scheduleEstimate(car, cq.key);
       cq = currentQuick(car); // now pending, so "no comparison" isn't flagged meanwhile
     }
-    const { qc, comparison, est } = cq;
+    const { qc, comparison, est, trust } = cq;
     renderSeller(car, qc);
-    const mismatches = form.gov?.fields
-      ? registryMismatches(draft, form.gov.fields, { models, resolved: form.govResolved }) : [];
-    const trust = mismatches.filter((m) => m.suspicious);
-    renderMismatches(mismatches);
+    renderVs(snapshot ? comparisonRows(car, snapshot.fields, { models }) : []);
     const quickStage = r.coverage < QUICK_CHECK_UNTIL;
 
     // Group headers: category points range, e.g. 18–25 / 25.
@@ -1101,14 +1118,14 @@ async function renderForm(id) {
       sections.push(h('section.panel-sec.trust', { role: 'alert' },
         h('h3', {}, ICON.alert(), t('trust.banner')),
         h('ul', {}, trust.map((m) => h('li', {}, h('bdi', { dir: 'auto' },
-          t(`trust.${m.suspicious}`, { ad: trustValue(m.key, m.mine), gov: trustValue(m.key, m.gov) }))))),
+          t(`trust.${m.code}`, { ad: trustValue(m.key, m.ad), gov: trustValue(m.key, m.gov) }))))),
         h('div.trust-hint', {}, t('trust.bannerHint'))));
     }
 
     // 1. Directions: what was found, what to do. In --bad.
     const dirs = [
       ...r.dealBreakers.confirmed.map((k) => t(`dir.db.${k}`)),
-      ...r.warnings.filter((w) => !(w === 'odometer_rollback' && trust.some((m) => m.suspicious === 'odometer'))).map((w) => t(`dir.${w}`)),
+      ...r.warnings.filter((w) => !(w === 'odometer_rollback' && trust.some((m) => m.code === 'odometer'))).map((w) => t(`dir.${w}`)),
     ];
     if (dirs.length) {
       sections.push(h('section.panel-sec.directions', { role: 'alert' },
@@ -1140,7 +1157,7 @@ async function renderForm(id) {
         h('ul.good-list', {}, s.good.map((i) => h('li', {}, t(i.key, fmtVars(i.vars)))))));
     }
     // Registry mismatches come first in "Watch out" (the odometer one is already there as a warning).
-    const watch = [...mismatches.filter((m) => !m.odometer).map((m) => ({ key: `sum.watch.mismatch.${m.key}` })), ...s.watch].slice(0, 3);
+    const watch = s.watch;
     if (watch.length || issueItems.length) {
       signs.push(h('div', {}, h('h4.watch', {}, t('panel.watchOut')),
         watch.length ? h('ul.watch-list', {}, watch.map((i) => h('li', {}, t(i.key, fmtVars(i.vars))))) : null,
@@ -1227,7 +1244,7 @@ async function renderForm(id) {
         api('POST', '/api/price-estimate', { id: saved.id, make: car.make, model: car.model, trim: car.trim, year: car.year,
           km: car.currentKm, ownership: car.originalOwnership, estimate: { low: form.estimate.low, high: form.estimate.high } }).catch(() => {});
       }
-      if (!id && saved?.id && form.gov?.fields) api('POST', '/api/registry', { id: saved.id, fields: form.gov.fields }).catch(() => {});
+      if (!id && saved?.id && form.gov?.fields) api('POST', '/api/registry', { id: saved.id, fields: form.gov.fields, ad: form.adIdentity }).catch(() => {});
       carsLoaded = false; // the list reloads everything
       location.hash = '#/';
     } catch (e) {

@@ -1,6 +1,7 @@
 // Shared helpers for the /api/cars Functions.
 import { scoreCar } from '../../public/scoring.js';
 import { toColumns, fromRow } from '../../public/fields.js';
+import { effectiveCar } from '../../public/govcompare.js';
 
 export function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -19,7 +20,8 @@ const today = () => new Date().toISOString().slice(0, 10);
 
 /** The score columns stored alongside each car, computed as of now. */
 export function scoreColumns(car) {
-  const r = scoreCar(car);
+  // Registry values (when a snapshot is stored) are the trustworthy source.
+  const r = scoreCar(effectiveCar(car, car.registry?.fields));
   return { score_min: r.scoreMin, score_max: r.scoreMax, rating: r.rating, coverage: r.coverage };
 }
 

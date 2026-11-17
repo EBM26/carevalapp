@@ -470,14 +470,6 @@ input::-webkit-date-and-time-value { text-align: start; }
 .skel-label { font-size: var(--fs-1); color: var(--steel); }
 .skel-label.still { display: none; }
 
-/* registry mismatches under a field */
-.mm:empty { display: none; }
-.mm { display: grid; gap: 6px; margin-block-start: 2px; padding: 8px 10px; border-radius: 6px; background: #FBF3E6; border: 1px solid #EBD3AC; }
-.mm-line { font-size: var(--fs-1); color: var(--ink); }
-.mm-line.bad { color: var(--bad); font-weight: 500; }
-.mm:has(.mm-line.bad) { background: #FBECEA; border-color: #EFC2BD; }
-.mm-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
   .skel-block { display: none; }
@@ -493,6 +485,34 @@ input::-webkit-date-and-time-value { text-align: start; }
 .panel-sec.trust h3 svg { width: 16px; height: 16px; flex: none; fill: currentColor; }
 .panel-sec.trust ul { margin: 0; padding-inline-start: 20px; display: grid; gap: 4px; font-size: var(--fs-2); color: var(--ink); }
 .trust-hint { font-size: var(--fs-1); color: var(--ink); }
-.mm.suspicious { background: #FBECEA; border-color: #EFC2BD; }
-.mm-flag { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--bad); }
-.mm-flag svg { width: 13px; height: 13px; fill: currentColor; }
+
+/* ---------- ad vs. registry ---------- */
+.vs-table { display: grid; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.vs-row {
+  display: grid; grid-template-columns: minmax(150px, 1fr) minmax(0, 1fr) minmax(0, 1.3fr); column-gap: 16px; row-gap: 4px;
+  align-items: center; padding: 10px 14px; border-block-start: 1px solid var(--line); font-size: var(--fs-2);
+}
+.vs-row:first-child { border-block-start: 0; }
+.vs-head { background: var(--surface); font-size: var(--fs-1); color: var(--steel); padding-block: 8px; }
+.vs-field { display: flex; align-items: center; gap: 10px; font-weight: 500; }
+.vs-icon {
+  display: inline-grid; place-items: center; width: 22px; height: 22px; flex: none; border-radius: 50%;
+  font-size: 13px; font-weight: 700; line-height: 1;
+}
+.vs-icon.match { color: var(--good); background: #EAF5EF; }
+.vs-icon.neutral { color: var(--steel); background: var(--surface); }
+.vs-icon.suspicious { color: var(--bad); background: #FBECEA; }
+.vs-icon.unknown { color: var(--steel); background: transparent; border: 1px dashed var(--line); }
+.vs-row.suspicious { background: #FDF5F4; }
+.vs-why { grid-column: 1 / -1; font-size: var(--fs-1); font-weight: 600; color: var(--bad); padding-inline-start: 32px; }
+.vs-note { margin: 10px 0 0; font-size: var(--fs-1); color: var(--steel); }
+
+/* Mobile: field name on top, then the two values side by side (each labelled). */
+@media (max-width: 599px) {
+  .vs-head { display: none; }
+  .vs-row { grid-template-columns: 1fr 1fr; padding: 12px; align-items: start; }
+  .vs-field { grid-column: 1 / -1; }
+  .vs-val { display: grid; gap: 2px; align-content: start; }
+  .vs-val::before { content: attr(data-label); font-size: 12px; color: var(--steel); }
+  .vs-why { padding-inline-start: 0; }
+}

@@ -9,6 +9,7 @@ import { onRequestPost as priceEstimate } from '../functions/api/price-estimate.
 import { onRequestPost as sellerMessage } from '../functions/api/seller-message.js';
 import { onRequestPost as modelNotes } from '../functions/api/model-notes.js';
 import { onRequestPost as registrySnapshot } from '../functions/api/registry.js';
+import { scoreColumns } from '../functions/_lib/cars.js';
 import { onRequestPost as sellerMessageWithTrust } from '../functions/api/seller-message.js';
 
 // ---------- fetch mock ----------
@@ -165,6 +166,18 @@ await test('/api/registry: missing column → 503; unknown car → 404; bad body
   eq((await registrySnapshot({ request: req({ id: 'abc', fields: {} }), env: { DB: fakeDb(1, true) } })).status, 503);
   eq((await registrySnapshot({ request: req({ id: 'abc', fields: {} }), env: { DB: fakeDb(0) } })).status, 404);
   eq((await registrySnapshot({ request: req({ fields: {} }), env: { DB: fakeDb(1) } })).status, 400);
+});
+await test('stored score columns use registry values when a snapshot exists', async () => {
+  const car = { firstRegistration: '2023-01', handCount: 1, originalOwnership: 'private', dealBreakers: {} };
+  const plain = scoreColumns(car);
+  const withReg = scoreColumns({ ...car, registry: { fields: { handCount: 3, originalOwnership: 'private' } } });
+  eq([plain.score_max - withReg.score_max], [15], '3 registered hands on a young car → ownership 0 instead of 15');
+});
+await test('/api/registry: stores the ad\'s differing identity claims next to the registry fields', async () => {
+  const DB = fakeDb(1);
+  await registrySnapshot({ request: req({ id: 'abc', fields: { year: 2021 }, ad: { year: '2022', junk: 1 } }), env: { DB } });
+  const stored = JSON.parse(DB.writes[0].args[0]);
+  eq([stored.fields, stored.ad], [{ year: 2021 }, { year: 2022 }]);
 });
 await test('network guard: an unmocked request fails loudly', async () => {
   let err;
