@@ -12,6 +12,11 @@ import { onRequestPost as registrySnapshot } from '../functions/api/registry.js'
 import { scoreColumns, withTitle, backfillTitles } from '../functions/_lib/cars.js';
 import { onRequestPost as parseReply } from '../functions/api/parse-reply.js';
 import { onRequestPost as createCars } from '../functions/api/cars/index.js';
+import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
+import { onRequest as middleware } from '../functions/_middleware.js';
+import { onRequestPut as updateCar } from '../functions/api/cars/[id].js';
+import { onRequestGet as listCars } from '../functions/api/cars/index.js';
 import { onRequestPost as sellerMessageWithTrust } from '../functions/api/seller-message.js';
 
 // ---------- fetch mock ----------
@@ -283,6 +288,79 @@ await test('title: cars from before titles get unique ones once', async () => {
   const DB = titleDb(rows);
   eq(await backfillTitles(DB), 2);
   eq(DB.writes.map((w) => w.args), [['Corolla 2022 · ₪70k', 'a'], ['Corolla 2022 · ₪70k (2)', 'b']]);
+});
+
+// ---------- save flow: login → create → edit → save (real SQL on node:sqlite) ----------
+// A D1-shaped adapter, so a missing column fails exactly as it does in production.
+const d1 = (sqlite) => ({
+  prepare: (sql) => {
+    const mk = (args) => ({
+      bind: (...a) => mk(a),
+      run: async () => { const r = sqlite.prepare(sql).run(...args); return { meta: { changes: r.changes } }; },
+      all: async () => ({ results: sqlite.prepare(sql).all(...args) }),
+      first: async () => sqlite.prepare(sql).get(...args) ?? null,
+    });
+    return mk([]);
+  },
+  batch: async (stmts) => Promise.all(stmts.map((s) => s.run())),
+});
+const SCHEMA = readFileSync(new URL('../schema.sql', import.meta.url), 'utf8');
+const newDb = (drop = []) => {
+  const sqlite = new DatabaseSync(':memory:');
+  sqlite.exec(SCHEMA);
+  for (const c of drop) sqlite.exec(`ALTER TABLE cars DROP COLUMN ${c}`); // an un-migrated database
+  return d1(sqlite);
+};
+const AUTH_ENV = { APP_PASSWORD: 'pw-for-tests', SESSION_SECRET: 'x'.repeat(40) };
+const login = async () => {
+  const form = new FormData(); form.set('password', AUTH_ENV.APP_PASSWORD);
+  const res = await middleware({ request: new Request('https://app.test/auth/login', { method: 'POST', body: form }), env: AUTH_ENV, next: () => { throw new Error('unreachable'); } });
+  return { res, cookie: res.headers.get('set-cookie') };
+};
+// Route through the real middleware with the session cookie, like a browser would.
+const call = async (cookie, method, path, body, handlers, env) => {
+  const request = new Request(`https://app.test${path}`, {
+    method, headers: { cookie: cookie.split(';')[0], 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined,
+  });
+  const id = /\/api\/cars\/([\w-]+)/.exec(path)?.[1];
+  return middleware({ request, env: { ...AUTH_ENV, ...env }, next: () => handlers({ request, env: { ...AUTH_ENV, ...env }, params: { id } }) });
+};
+await test('session cookie: __Host-, Path=/, HttpOnly, SameSite=Lax, Secure, Max-Age 30 days in seconds', async () => {
+  const { res, cookie } = await login();
+  eq(res.status, 303);
+  eq(cookie.startsWith('__Host-session=v1.'), true);
+  for (const a of ['Path=/;', 'HttpOnly', 'SameSite=Lax', 'Secure', 'Max-Age=2592000']) eq(cookie.includes(a), true, a);
+  eq(/Domain=/i.test(cookie), false);
+});
+await test('save flow: create, edit and save a car with the session cookie', async () => {
+  const DB = newDb();
+  const { cookie } = await login();
+  const car = { make: 'Toyota', model: 'Corolla', year: 2022, askingPrice: 70000, currentKm: 40000, location: 'Petah Tikva', sellerName: 'Dan', sellerPhone: '0501234567', adValues: { currentKm: 40000 } };
+  const created = await call(cookie, 'POST', '/api/cars', car, createCars, { DB });
+  eq(created.status, 201);
+  const saved = await created.json();
+  eq(saved.title, 'Corolla 2022 · Petah Tikva · ₪70k');
+  const put = await call(cookie, 'PUT', `/api/cars/${saved.id}`, { ...saved, currentKm: 41000, notes: 'edited' }, updateCar, { DB });
+  eq(put.status, 200);
+  const after = await put.json();
+  eq([after.currentKm, after.notes, after.title], [41000, 'edited', saved.title]);
+  eq((await (await call(cookie, 'GET', '/api/cars', null, listCars, { DB })).json()).length, 1);
+});
+await test('save without a valid cookie is 401 JSON (the only case that means "session expired")', async () => {
+  const request = new Request('https://app.test/api/cars', { method: 'POST', body: '{}', headers: { cookie: '__Host-session=v1.1.bad' } });
+  const res = await middleware({ request, env: AUTH_ENV, next: () => { throw new Error('unreachable'); } });
+  eq(res.status, 401);
+  eq((await res.json()).error, 'unauthorized');
+});
+await test('save on an un-migrated database: JSON 500 with the cause, never 401', async () => {
+  const DB = newDb(['title', 'ad_values', 'seller_name']);
+  const { cookie } = await login();
+  const origErr = console.error; console.error = () => {};
+  const res = await call(cookie, 'POST', '/api/cars', { make: 'Mazda', model: '3', year: 2020 }, createCars, { DB });
+  console.error = origErr;
+  eq(res.status, 500);
+  eq(res.headers.get('content-type').includes('application/json'), true);
+  eq(/no such column|no column/i.test((await res.json()).detail), true);
 });
 await test('network guard: an unmocked request fails loudly', async () => {
   let err;

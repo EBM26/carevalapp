@@ -204,7 +204,15 @@ export async function onRequest(context) {
     return loginPage({ lang, next: target, errorKey: 'login.wrong', status: 401 });
   }
 
-  if (await verifySession(readCookie(request, cookie.name), env)) return next();
+  if (await verifySession(readCookie(request, cookie.name), env)) {
+    // An unhandled error in a route (e.g. a missing D1 column) would otherwise be a
+    // plain-text 500; return JSON so the app can show the real cause.
+    if (!isApi) return next();
+    try { return await next(); } catch (e) {
+      console.error(e);
+      return json({ error: 'server_error', detail: String(e?.message || e).slice(0, 200) }, 500);
+    }
+  }
 
   return isApi
     ? json({ error: 'unauthorized' }, 401)

@@ -153,13 +153,16 @@ async function api(method, path, body) {
     body: body !== undefined ? JSON.stringify(body) : undefined,
     credentials: 'same-origin',
   });
-  // 401 = session cookie expired or was invalidated (password/secret changed).
-  // A non-JSON response is most likely a login page from some proxy in front.
-  if (res.status === 401 || !(res.headers.get('content-type') || '').includes('application/json')) {
-    throw Object.assign(new Error(t('sessionExpired')), { status: res.status });
+  // Only 401 means the session is gone (cookie expired, or password/secret changed).
+  if (res.status === 401) throw Object.assign(new Error(t('sessionExpired')), { status: 401 });
+  // Anything else that isn't JSON (a platform 5xx page, a proxy) is not a session problem:
+  // show the real status and a short snippet instead.
+  if (!(res.headers.get('content-type') || '').includes('application/json')) {
+    const snippet = (await res.text().catch(() => '')).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+    throw Object.assign(new Error(`HTTP ${res.status}${snippet ? `: ${snippet}` : ''}`), { status: res.status });
   }
   const data = await res.json();
-  if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { data, status: res.status });
+  if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}: ${data.error || data.detail || 'request failed'}`), { data, status: res.status });
   return data;
 }
 
