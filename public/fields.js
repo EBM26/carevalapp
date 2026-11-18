@@ -32,6 +32,7 @@ export const FIELDS = [
   ['govStructuralChange', 'gov_structural_change', 'bool'],
   ['notes', 'notes', 'text', 5000],
   ['listingUrl', 'listing_url', 'url'],
+  ['sellerName', 'seller_name', 'text', 100],
   ['sellerPhone', 'seller_phone', 'phone'],
   ['status', 'status', 'enum', ENUMS.status],
 ].map(([key, col, type, arg]) => ({ key, col, type, arg }));

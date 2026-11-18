@@ -180,6 +180,7 @@ Existing databases need each file in `migrations/` applied once, in order. New d
 | `0003_quick_check.sql` | Adds the `settings` table (budget ceiling) and the cache column for the AI price estimate | `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT NOT NULL);` then `ALTER TABLE cars ADD COLUMN price_estimate TEXT;` |
 | `0004_registry_snapshot.sql` | Stores the last registry lookup per car, so the list can show seller-trust flags | `ALTER TABLE cars ADD COLUMN registry TEXT;` |
 | `0005_location.sql` | Adds the car's location (city / area). **Required:** saving a car fails until it's applied | `ALTER TABLE cars ADD COLUMN location TEXT;` |
+| `0006_seller_name.sql` | Adds the seller's name (greeting in the WhatsApp message). **Required:** saving a car fails until it's applied | `ALTER TABLE cars ADD COLUMN seller_name TEXT;` |
 
 If the console answers `duplicate column name`, the migration is already applied. The old `cabin_fit` column is no longer used; it's left in place (no destructive migration). Until migrations 0002–0004 are applied the app still works: "Known issues" and the AI price estimate just aren't cached, and the budget ceiling can't be saved.
 

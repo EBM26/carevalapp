@@ -348,6 +348,7 @@ function rowSub(car, r) {
   const kpy = r.parts.mileage.kpy;
   const bits = [];
   if (car.location) bits.push(h('bdi', { dir: 'auto' }, car.location));
+  if (car.sellerName) bits.push(h('bdi.sub-seller', { dir: 'auto' }, car.sellerName));
   if (kpy) {
     bits.push(h('span.sub-kpy', { title: kpy.estimated ? t('kpy.estimated') : null },
       ltrNums(t('kpy.value', { n: fmt.format(kpy.value) })), kpy.estimated ? ` (${t('kpy.estShort')})` : ''));
@@ -425,7 +426,8 @@ async function importJson(e) {
 // ---------- form view ----------
 // Groups in rubric order. `cat` = the scoring category whose points range shows in the header.
 const GROUPS = [
-  { key: 'car', cat: null, fields: ['plate', 'make', 'model', 'trim', 'year', 'location', 'status:full', 'listingUrl', 'sellerPhone', 'notes:full'] },
+  { key: 'car', cat: null, fields: ['plate', 'make', 'model', 'trim', 'year', 'location', 'status:full', 'listingUrl', 'notes:full'] },
+  { key: 'seller', cat: null, fields: ['sellerName', 'sellerPhone'] },
   { key: 'history', cat: 'history', fields: ['insuranceClaims:full', 'serviceHistory:full'] },
   { key: 'price', cat: 'price', fields: ['askingPrice', 'benchmark'] },
   { key: 'mileage', cat: 'mileage', fields: ['currentKm', 'firstRegistration', 'lastTestKm', 'lastTestDate'] },

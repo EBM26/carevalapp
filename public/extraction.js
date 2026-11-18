@@ -39,6 +39,7 @@ export const EXTRACT_SCHEMA = {
     originalOwnership: { ...STR, description: 'One of: private, private_lease, fleet_lease, rental, driving_school.' },
     testExpiry: { ...STR, description: 'Test valid until (טסט עד) as YYYY-MM-DD, or YYYY-MM if only the month is shown.' },
     tires: { ...STR, description: 'One of: good, ok, worn. Only if the ad states the tire condition.' },
+    sellerName: { ...STR, description: 'Seller name (שם המוכר / מפרסם) if shown, as written in the ad.' },
     sellerPhone: { ...STR, description: 'Seller phone number if visible.' },
     notes: { ...STR, description: 'Up to 300 characters: other facts the ad states (e.g. seller claims about accidents or service history), in the ad\'s language.' },
   },
@@ -119,7 +120,7 @@ export function parseAnthropicResponse(body) {
 
 const TYPES = {
   plate: 'plate', make: 'text', model: 'text', trim: 'text', year: 'int', currentKm: 'int',
-  askingPrice: 'int', handCount: 'int', sellerPhone: 'phone', location: 'text',
+  askingPrice: 'int', handCount: 'int', sellerName: 'text', sellerPhone: 'phone', location: 'text',
 };
 
 /** Validate model output into car fields. Anything invalid becomes null. */

@@ -6,6 +6,7 @@
 import { num } from './scoring.js';
 import { kmPerYear } from './scoring.js';
 import { TRUST_CODES } from './govcompare.js';
+import { greeting } from './seller.js';
 
 export const MAX_QUESTIONS = 6;
 const MAX_LEN = 1200;
@@ -96,7 +97,7 @@ export function sellerPrompt(car, { lang = 'he', reasons = [], trust = [], asOf 
   return `You are a private buyer in Israel writing a WhatsApp message to the seller of a used car you saw in an ad.
 
 ${language} It must sound like a real person typing on their phone, not a form: no bullet points, no numbering, no headings.
-Structure: one short greeting line, then at most ${MAX_QUESTIONS} short questions woven into a few natural sentences.
+Structure: one short greeting line starting exactly with "${greeting(car.sellerName, lang)}", then at most ${MAX_QUESTIONS} short questions woven into a few natural sentences.
 
 What to ask, in this order:
 ${asks.join('\n')}

@@ -20,6 +20,19 @@ export function trustQuestions(trust, lang = 'he') {
   });
 }
 
+/** First word of the seller's name, or null. */
+export function firstName(name) {
+  const s = String(name ?? '').trim().split(/\s+/)[0] || '';
+  return s.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '') || null;
+}
+
+/** "היי דני," / "Hi Dani," — or the neutral "היי," / "Hi,". */
+export function greeting(name, lang = 'he') {
+  const base = lang === 'en' ? 'Hi' : 'היי';
+  const n = firstName(name);
+  return n ? `${base} ${n},` : `${base},`;
+}
+
 /** Returns the message text, or null if there is nothing to ask. */
 export function buildSellerMessage(car, lang = 'he', { trust = [] } = {}) {
   const s = SELLER[lang] || SELLER.he;
@@ -42,7 +55,8 @@ export function buildSellerMessage(car, lang = 'he', { trust = [] } = {}) {
   else if (service) q.push(s.service);
   else if (slikah) q.push(s.slikah);
 
-  return q.length ? `${s.opener} ${q.join(' ')}` : null;
+  const opener = s.opener.replace(/^(היי|Hi),/, greeting(car.sellerName, lang));
+  return q.length ? `${opener} ${q.join(' ')}` : null;
 }
 
 /** Israeli/international phone → wa.me digits (e.g. 050-1234567 → 972501234567), or null. */

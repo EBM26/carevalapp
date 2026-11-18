@@ -16,7 +16,7 @@ import { quickCheck, findComparables, savedComparison, resolveComparison, estima
 import { normalizeEstimate, estimatePrompt, ESTIMATE_SCHEMA } from './priceestimate.js';
 import { sellerMissing, sellerTopics, sellerPrompt, normalizeMessage, cleanTrust } from './sellermsg.js';
 import { modelKey, normalizeNotes, NOTES_SCHEMA, buildGeminiNotesRequest, buildAnthropicNotesRequest, notesPrompt } from './modelnotes.js';
-import { buildSellerMessage, waNumber, waLink, waAppLink, isMobileDevice } from './seller.js';
+import { buildSellerMessage, firstName, greeting, waNumber, waLink, waAppLink, isMobileDevice } from './seller.js';
 import { mapGov, mergeGov, mergeFields, stripCountry, normYm } from './govmap.js';
 import { normalizeExtraction, validateImages, buildGeminiRequest, buildAnthropicRequest, parseGeminiResponse, parseAnthropicResponse, EXTRACT_SCHEMA } from './extraction.js';
 
@@ -931,6 +931,27 @@ test('Seller AI', 'message cleaned; empty → null (template fallback)', () => {
   eq(normalizeMessage({ message: '  היי!\n\n\n\nמה המספר?  ' }), 'היי!\n\nמה המספר?');
   eq([normalizeMessage({ message: '' }), normalizeMessage(null)], [null, null]);
 });
+
+// ---------------- Seller name ----------------
+
+test('Seller name', 'field stored in its own column; extraction reads name and phone', () => {
+  eq(sanitizeCar({ sellerName: '  דני כהן ' }).sellerName, 'דני כהן');
+  eq(FIELDS.find((f) => f.key === 'sellerName').col, 'seller_name');
+  eq(['sellerName', 'sellerPhone'].every((k) => k in EXTRACT_SCHEMA.properties && EXTRACT_SCHEMA.required.includes(k)), true);
+  eq(normalizeExtraction({ sellerName: ' דני ', sellerPhone: '050-123-4567' }).sellerName, 'דני');
+  eq(normalizeExtraction({}).sellerName, null);
+});
+test('Seller name', 'phone 05X → 9725X for wa.me', () => eq(waNumber('052-123-4567'), '972521234567'));
+test('Seller name', 'greeting uses the first name, else neutral', () => {
+  eq(firstName('  דני כהן '), 'דני');
+  eq([greeting('דני כהן', 'he'), greeting('Dani Levi', 'en'), greeting(null, 'he'), greeting('', 'en')], ['היי דני,', 'Hi Dani,', 'היי,', 'Hi,']);
+  eq(buildSellerMessage({ sellerName: 'דני כהן' }).startsWith('היי דני, '), true);
+  eq(buildSellerMessage({ sellerName: 'Dani' }, 'en').startsWith('Hi Dani, '), true);
+  eq(buildSellerMessage({}).startsWith('היי, '), true);
+  eq(sellerPrompt({ sellerName: 'Dani Levi' }, { lang: 'en' }).includes('starting exactly with "Hi Dani,"'), true);
+  eq(sellerPrompt({}, { lang: 'he' }).includes('starting exactly with "היי,"'), true);
+});
+test('Seller name', 'labels in EN and HE', () => eq([STRINGS.en['field.sellerName'], STRINGS.he['grp.seller']], ['Seller name', 'מוכר']));
 
 // ---------------- Names & registry comparison ----------------
 
