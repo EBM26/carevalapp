@@ -16,7 +16,7 @@ import { quickCheck, findComparables, savedComparison, resolveComparison, estima
 import { normalizeEstimate, estimatePrompt, ESTIMATE_SCHEMA } from './priceestimate.js';
 import { sellerMissing, sellerTopics, sellerPrompt, normalizeMessage, cleanTrust } from './sellermsg.js';
 import { modelKey, normalizeNotes, NOTES_SCHEMA, buildGeminiNotesRequest, buildAnthropicNotesRequest, notesPrompt } from './modelnotes.js';
-import { buildSellerMessage, waNumber, waLink } from './seller.js';
+import { buildSellerMessage, waNumber, waLink, waAppLink, isMobileDevice } from './seller.js';
 import { mapGov, mergeGov, mergeFields, stripCountry, normYm } from './govmap.js';
 import { normalizeExtraction, validateImages, buildGeminiRequest, buildAnthropicRequest, parseGeminiResponse, parseAnthropicResponse, EXTRACT_SCHEMA } from './extraction.js';
 
@@ -451,6 +451,12 @@ test('Seller', 'wa.me number from Israeli formats', () =>
 test('Seller', 'wa.me link has the message URL-encoded', () =>
   eq(waLink('050-1234567', 'היי? a&b'), `https://wa.me/972501234567?text=${encodeURIComponent('היי? a&b')}`));
 test('Seller', 'no phone → no link', () => eq(waLink(null, 'x'), null));
+test('Seller', 'desktop app deep link', () =>
+  eq(waAppLink('050-1234567', 'היי? a&b'), `whatsapp://send?phone=972501234567&text=${encodeURIComponent('היי? a&b')}`));
+test('Seller', 'mobile detection', () => eq(
+  [isMobileDevice({ userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)' }), isMobileDevice({ userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', maxTouchPoints: 5 }),
+    isMobileDevice({ userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', maxTouchPoints: 0 }), isMobileDevice({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' })],
+  [true, true, false, false]));
 
 // ---------------- Gov data mapping ----------------
 // Fixtures are real records fetched from data.gov.il on 2026-11-16.

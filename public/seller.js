@@ -60,3 +60,43 @@ export function waLink(phone, text) {
   if (!n) return null;
   return `https://wa.me/${n}${text ? `?text=${encodeURIComponent(text)}` : ''}`;
 }
+
+/** whatsapp:// deep link for the desktop app, or null without a usable phone. */
+export function waAppLink(phone, text) {
+  const n = waNumber(phone);
+  if (!n) return null;
+  return `whatsapp://send?phone=${n}${text ? `&text=${encodeURIComponent(text)}` : ''}`;
+}
+
+/** Phones and tablets (incl. iPadOS, which reports itself as a Mac). */
+export function isMobileDevice(nav = globalThis.navigator) {
+  if (!nav) return false;
+  const ua = nav.userAgent || '';
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || (/Macintosh/.test(ua) && nav.maxTouchPoints > 1);
+}
+
+/**
+ * Open WhatsApp with the message. Mobile: wa.me. Desktop: try the installed app,
+ * and fall back to wa.me if the page didn't lose focus within ~1.5 s.
+ * Must be called from a user gesture. Returns false without a usable phone.
+ */
+export function sendWhatsApp(phone, text) {
+  const web = waLink(phone, text);
+  if (!web) return false;
+  const openWeb = () => {
+    const w = window.open(web, '_blank'); // not 'noopener': that always returns null
+    if (w) w.opener = null; else location.href = web;
+  };
+  if (isMobileDevice()) { openWeb(); return true; }
+  let left = false;
+  const onLeave = () => { left = true; };
+  window.addEventListener('blur', onLeave, { once: true });
+  document.addEventListener('visibilitychange', onLeave, { once: true });
+  setTimeout(() => {
+    window.removeEventListener('blur', onLeave);
+    document.removeEventListener('visibilitychange', onLeave);
+    if (!left && !document.hidden) openWeb();
+  }, 1500);
+  location.href = waAppLink(phone, text);
+  return true;
+}

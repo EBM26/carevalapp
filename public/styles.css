@@ -400,7 +400,7 @@ input::-webkit-date-and-time-value { text-align: start; }
 .seller textarea { background: var(--surface); min-height: 0; font-size: var(--fs-2); resize: none; }
 .seller-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .btn.wa { background: var(--good); border-color: var(--good); color: #fff; }
-.btn.wa:hover { background: #197A4D; }
+.btn.wa:hover:not(:disabled) { background: #197A4D; }
 
 /* ---------- toast (floats) ---------- */
 #toast {

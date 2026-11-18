@@ -2,7 +2,7 @@
 import { scoreCar, ENUMS, DEAL_BREAKERS, num, RAW_TOTAL } from './scoring.js';
 import { FIELDS, sanitizeCar, cleanValue } from './fields.js';
 import { STRINGS } from './i18n.js';
-import { buildSellerMessage, waLink } from './seller.js';
+import { buildSellerMessage, waNumber, sendWhatsApp } from './seller.js';
 import { mergeFields } from './govmap.js';
 import { MAX_IMAGES } from './extraction.js';
 import { verdict } from './verdict.js';
@@ -995,18 +995,25 @@ async function renderForm(id) {
       return;
     }
     const text = h('textarea', { rows: 6, dir: form.sellerLang === 'he' ? 'rtl' : 'ltr', lang: form.sellerLang, value: st.text, 'aria-label': t('seller.title'), disabled: loading });
-    const wa = waLink(car.sellerPhone, st.text);
-    const waBtn = wa ? h('a.btn.small.wa', { href: wa, target: '_blank', rel: 'noopener' }, t('seller.whatsapp')) : null;
-    text.addEventListener('input', () => {
-      form.seller.text = text.value;
-      if (waBtn) waBtn.href = waLink(car.sellerPhone, text.value);
-    });
+    const hasPhone = Boolean(waNumber(car.sellerPhone));
+    const waBtn = h('button.btn.small.wa', {
+      type: 'button', disabled: !hasPhone, title: hasPhone ? null : t('seller.noPhone'),
+      onclick: () => {
+        // Send exactly what's in the box now, then move the car along.
+        if (!sendWhatsApp(buildCar(draft).sellerPhone, text.value)) return;
+        if ((draft.status || 'considering') === 'considering') {
+          const r = formEl.querySelector('input[name="status"][value="contacted"]');
+          if (r) { r.checked = true; r.dispatchEvent(new Event('input', { bubbles: true })); } else { draft.status = 'contacted'; renderPanel(); }
+        }
+      },
+    }, t('seller.whatsapp'));
+    text.addEventListener('input', () => { form.seller.text = text.value; });
     if (st.status === 'fallback') kids.push(h('div.note', {}, t(st.limit ? 'seller.fallbackLimit' : 'seller.fallback')));
     kids.push(text, h('div.seller-actions', {},
       h('button.btn.small', { type: 'button', onclick: () => copyText(text.value, text) }, t('seller.copy')),
       waBtn,
       h('button.btn.small', { type: 'button', onclick: writeMessage, disabled: loading }, t(loading ? 'seller.writing' : 'seller.rewrite')),
-      wa ? null : h('span.note', {}, t('seller.noPhone'))));
+      hasPhone ? null : h('span.note', {}, t('seller.noPhone'))));
     sellerBox.replaceChildren(...kids);
   }
 
