@@ -40,6 +40,8 @@ Stack: Cloudflare Pages (static `public/`), Pages Functions (`functions/`), D1. 
 | `functions/api/settings.js` | `GET/PUT /api/settings` (budget ceiling) |
 | `functions/api/price-estimate.js` | `POST /api/price-estimate` (rough AI price range, cached per car) |
 | `functions/api/seller-message.js` | `POST /api/seller-message` (AI-written WhatsApp message; the app falls back to a template) |
+| `functions/api/parse-reply.js` | `POST /api/parse-reply` (seller's reply: pasted text and/or screenshots/PDFs → answers mapped to fields) |
+| `public/upload.js`, `reply.js`, `title.js` | Merge rules for uploads and replies (add, never replace), reply prompt/schema, unique titles |
 | `functions/api/registry.js` | `POST /api/registry` (stores the registry snapshot for a saved car) |
 | `functions/api/model-notes.js` | `POST /api/model-notes` (known issues for a make/model/year, cached per car) |
 | `functions/_lib/llm.js` | Shared Gemini/Anthropic call used by both LLM endpoints |
@@ -181,6 +183,7 @@ Existing databases need each file in `migrations/` applied once, in order. New d
 | `0004_registry_snapshot.sql` | Stores the last registry lookup per car, so the list can show seller-trust flags | `ALTER TABLE cars ADD COLUMN registry TEXT;` |
 | `0005_location.sql` | Adds the car's location (city / area). **Required:** saving a car fails until it's applied | `ALTER TABLE cars ADD COLUMN location TEXT;` |
 | `0006_seller_name.sql` | Adds the seller's name (greeting in the WhatsApp message). **Required:** saving a car fails until it's applied | `ALTER TABLE cars ADD COLUMN seller_name TEXT;` |
+| `0007_title_ad_values.sql` | Adds the unique car title and the original ad values. **Required:** saving a car fails until it's applied (the list still loads) | `ALTER TABLE cars ADD COLUMN title TEXT; ALTER TABLE cars ADD COLUMN ad_values TEXT;` (run each statement separately) |
 
 If the console answers `duplicate column name`, the migration is already applied. The old `cabin_fit` column is no longer used; it's left in place (no destructive migration). Until migrations 0002–0004 are applied the app still works: "Known issues" and the AI price estimate just aren't cached, and the budget ceiling can't be saved.
 

@@ -9,7 +9,9 @@ import { onRequestPost as priceEstimate } from '../functions/api/price-estimate.
 import { onRequestPost as sellerMessage } from '../functions/api/seller-message.js';
 import { onRequestPost as modelNotes } from '../functions/api/model-notes.js';
 import { onRequestPost as registrySnapshot } from '../functions/api/registry.js';
-import { scoreColumns } from '../functions/_lib/cars.js';
+import { scoreColumns, withTitle, backfillTitles } from '../functions/_lib/cars.js';
+import { onRequestPost as parseReply } from '../functions/api/parse-reply.js';
+import { onRequestPost as createCars } from '../functions/api/cars/index.js';
 import { onRequestPost as sellerMessageWithTrust } from '../functions/api/seller-message.js';
 
 // ---------- fetch mock ----------
@@ -179,6 +181,108 @@ await test('/api/registry: stores the ad\'s differing identity claims next to th
   await registrySnapshot({ request: req({ id: 'abc', fields: { year: 2021 }, ad: { year: '2022', junk: 1 } }), env: { DB } });
   const stored = JSON.parse(DB.writes[0].args[0]);
   eq([stored.fields, stored.ad], [{ year: 2021 }, { year: 2022 }]);
+});
+// ---------- PDFs ----------
+const PDF = { mimeType: 'application/pdf', data: 'JVBERi0xLjQK'.repeat(20) };
+await test('/api/extract: a PDF and an image together go to the vision model, the PDF inline as application/pdf', async () => {
+  reset(geminiOk({ make: 'Kia', model: 'Niro' }));
+  const res = await extract({ request: req({ images: [IMG, PDF] }), env: ENV });
+  const parts = calls[0].body.contents[0].parts;
+  eq([res.status, calls[0].model, parts[1].inlineData.mimeType, parts[2].inlineData.mimeType], [200, 'gemini-3.6-flash', 'image/jpeg', 'application/pdf']);
+});
+await test('/api/extract: PDF with vision 429 → same fallback to the text model', async () => {
+  reset(geminiErr(429), geminiOk({ make: 'Kia' }));
+  const res = await extract({ request: req({ images: [PDF] }), env: ENV });
+  eq([res.status, calls.map((c) => c.model), calls[1].body.contents[0].parts[1].inlineData.mimeType], [200, ['gemini-3.6-flash', 'gemini-3.5-flash-lite'], 'application/pdf']);
+});
+await test('/api/extract: more than 4 files → 400', async () => {
+  reset();
+  const res = await extract({ request: req({ images: [IMG, IMG, IMG, IMG, IMG] }), env: ENV });
+  eq([res.status, calls.length], [400, 0]);
+});
+
+// ---------- /api/parse-reply (mocked) ----------
+const REPLY = { plate: '12-345-67', originalOwnership: 'private', handCount: 2, testExpiry: '2027-03-15', trim: null,
+  serviceHistory: 'full', insuranceClaims: 'none', dealBreakers: { structuralDamage: 'no', totalLoss: null, lien: null, sellerRefuses: null }, notes: 'Can meet Friday' };
+await test('/api/parse-reply: text only → the text model; answers mapped and cleaned', async () => {
+  reset(geminiOk(REPLY));
+  const res = await parseReply({ request: req({ text: 'כן, יד שנייה, פרטית', sent: 'היי, מה מספר הרישוי?', asked: ['plate', 'bogus', 'serviceHistory'] }), env: ENV });
+  const data = await res.json();
+  const prompt = calls[0].body.contents[0].parts[0].text;
+  eq([res.status, calls[0].model, data.fields.plate, data.fields.handCount, data.fields.insuranceClaims, data.dealBreakers.structuralDamage, data.notes],
+    [200, 'gemini-3.5-flash-lite', '1234567', 2, 'none', 'no', 'Can meet Friday']);
+  eq([prompt.includes('היי, מה מספר הרישוי?'), prompt.includes('the license plate number'), prompt.includes('bogus'), calls[0].body.contents[0].parts.length], [true, true, false, 1]);
+});
+await test('/api/parse-reply: with a PDF → the vision model; the PDF is inline', async () => {
+  reset(geminiOk({ ...REPLY, insuranceClaims: 'moderate' }));
+  const res = await parseReply({ request: req({ files: [PDF], asked: ['insuranceClaims'] }), env: ENV });
+  eq([res.status, calls[0].model, calls[0].body.contents[0].parts[1].inlineData.mimeType, (await res.json()).fields.insuranceClaims], [200, 'gemini-3.6-flash', 'application/pdf', 'moderate']);
+});
+await test('/api/parse-reply: text and files together; vision 429 → text model fallback', async () => {
+  reset(geminiErr(429), geminiOk(REPLY));
+  const res = await parseReply({ request: req({ text: 'ראו מצורף', files: [IMG, PDF] }), env: ENV });
+  eq([res.status, calls.map((c) => c.model)], [200, ['gemini-3.6-flash', 'gemini-3.5-flash-lite']]);
+});
+await test('/api/parse-reply: quota → ai_limit; nothing to read → 400; bad file → 400', async () => {
+  reset(geminiErr(429));
+  let res = await parseReply({ request: req({ text: 'כן' }), env: ENV });
+  eq([res.status, (await res.json()).error], [429, 'ai_limit']);
+  reset();
+  eq((await parseReply({ request: req({}), env: ENV })).status, 400);
+  eq((await parseReply({ request: req({ files: [{ mimeType: 'text/html', data: 'QUJD'.repeat(40) }] }), env: ENV })).status, 400);
+  eq(calls.length, 0);
+});
+await test('/api/parse-reply: junk from the model is cleaned to nulls', async () => {
+  reset(geminiOk({ originalOwnership: 'company', handCount: 50, insuranceClaims: 'huge', dealBreakers: { lien: 'maybe' } }));
+  const data = await (await parseReply({ request: req({ text: 'x' }), env: ENV })).json();
+  eq([Object.values(data.fields).every((v) => v === null), data.dealBreakers.lien], [true, null]);
+});
+
+// ---------- titles: unique per car (fake D1) ----------
+function titleDb(rows) {
+  const writes = [];
+  return {
+    writes,
+    prepare: (sql) => ({
+      all: async () => ({ results: rows }),
+      bind: (...args) => ({ run: async () => { writes.push({ sql, args }); return { meta: { changes: 1 } }; }, args, sql }),
+    }),
+    batch: async (stmts) => { writes.push(...stmts.map((s) => ({ sql: s.sql, args: s.args }))); },
+  };
+}
+const CAR = { model: 'Corolla', year: 2022, location: 'Petah Tikva', askingPrice: 70000 };
+await test('title: generated on first save, then " (2)", " (3)" for the same car', async () => {
+  eq((await withTitle(titleDb([]), CAR)).title, 'Corolla 2022 · Petah Tikva · ₪70k');
+  eq((await withTitle(titleDb([{ id: 'a', title: 'Corolla 2022 · Petah Tikva · ₪70k' }]), CAR)).title, 'Corolla 2022 · Petah Tikva · ₪70k (2)');
+  const rows = [{ id: 'a', title: 'Corolla 2022 · Petah Tikva · ₪70k' }, { id: 'b', title: 'Corolla 2022 · Petah Tikva · ₪70k (2)' }];
+  eq((await withTitle(titleDb(rows), CAR)).title, 'Corolla 2022 · Petah Tikva · ₪70k (3)');
+});
+await test('title: editing a car keeps its own title (it does not clash with itself)', async () => {
+  const rows = [{ id: 'a', title: 'My Corolla' }, { id: 'b', title: 'Other' }];
+  eq((await withTitle(titleDb(rows), { ...CAR, title: 'My Corolla' }, 'a')).title, 'My Corolla');
+  eq((await withTitle(titleDb(rows), { ...CAR, title: 'Other' }, 'a')).title, 'Other (2)'); // renamed onto another car's title
+});
+await test('title: a typed title is kept; an empty one is regenerated', async () => {
+  eq((await withTitle(titleDb([]), { ...CAR, title: 'Family car' })).title, 'Family car');
+  eq((await withTitle(titleDb([]), { ...CAR, title: '  ' })).title, 'Corolla 2022 · Petah Tikva · ₪70k');
+});
+await test('title: POST /api/cars stores a unique generated title', async () => {
+  const DB = titleDb([{ id: 'a', title: 'Corolla 2022 · Petah Tikva · ₪70k' }]);
+  const res = await createCars({ request: req(CAR), env: { DB } }).catch((e) => ({ status: 0, e }));
+  // getCar() reads a row we don't fake; the insert itself is what matters
+  const insert = DB.writes.find((w) => /INSERT INTO cars/.test(w.sql));
+  eq(res.status === 0 || res.status === 201, true);
+  eq(insert.args.includes('Corolla 2022 · Petah Tikva · ₪70k (2)'), true);
+});
+await test('title: cars from before titles get unique ones once', async () => {
+  const rows = [
+    { id: 'a', model: 'Corolla', year: 2022, asking_price: 70000, date_added: '2026-01-01', title: null },
+    { id: 'b', model: 'Corolla', year: 2022, asking_price: 70000, date_added: '2026-01-02', title: null },
+    { id: 'c', title: 'Kept', date_added: '2026-01-03' },
+  ];
+  const DB = titleDb(rows);
+  eq(await backfillTitles(DB), 2);
+  eq(DB.writes.map((w) => w.args), [['Corolla 2022 · ₪70k', 'a'], ['Corolla 2022 · ₪70k (2)', 'b']]);
 });
 await test('network guard: an unmocked request fails loudly', async () => {
   let err;

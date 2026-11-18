@@ -2,6 +2,7 @@
 import { scoreCar } from '../../public/scoring.js';
 import { toColumns, fromRow } from '../../public/fields.js';
 import { effectiveCar } from '../../public/govcompare.js';
+import { resolveTitle } from '../../public/title.js';
 
 export function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -63,6 +64,33 @@ export async function refreshScores(db) {
       stmts.push(db.prepare('UPDATE cars SET score_min = ?, score_max = ?, rating = ?, coverage = ? WHERE id = ?')
         .bind(s.score_min, s.score_max, s.rating, s.coverage, row.id));
     }
+  }
+  if (stmts.length) await db.batch(stmts);
+  return stmts.length;
+}
+
+/** Titles in use by cars other than `exceptId`. */
+export async function takenTitles(db, exceptId = null) {
+  const { results } = await db.prepare('SELECT id, title FROM cars WHERE title IS NOT NULL').all();
+  return results.filter((r) => r.id !== exceptId).map((r) => r.title);
+}
+
+/** The car with its title settled: kept if unique, "(2)", "(3)" … if taken, generated if empty. */
+export async function withTitle(db, car, exceptId = null) {
+  return { ...car, title: resolveTitle(car, await takenTitles(db, exceptId)) };
+}
+
+/** Cars that predate titles get one (unique), once. Returns how many were filled. */
+export async function backfillTitles(db) {
+  const { results } = await db.prepare('SELECT * FROM cars ORDER BY date_added, rowid').all();
+  const taken = results.map((r) => r.title).filter(Boolean);
+  const stmts = [];
+  for (const row of results) {
+    if (row.title) continue;
+    const title = resolveTitle(fromRow(row), taken);
+    if (!title) continue;
+    taken.push(title);
+    stmts.push(db.prepare('UPDATE cars SET title = ? WHERE id = ?').bind(title, row.id));
   }
   if (stmts.length) await db.batch(stmts);
   return stmts.length;

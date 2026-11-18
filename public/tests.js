@@ -18,7 +18,12 @@ import { sellerMissing, sellerTopics, sellerPrompt, normalizeMessage, cleanTrust
 import { modelKey, normalizeNotes, NOTES_SCHEMA, buildGeminiNotesRequest, buildAnthropicNotesRequest, notesPrompt } from './modelnotes.js';
 import { buildSellerMessage, firstName, greeting, waNumber, waLink, waAppLink, isMobileDevice } from './seller.js';
 import { mapGov, mergeGov, mergeFields, stripCountry, normYm } from './govmap.js';
-import { normalizeExtraction, validateImages, buildGeminiRequest, buildAnthropicRequest, parseGeminiResponse, parseAnthropicResponse, EXTRACT_SCHEMA } from './extraction.js';
+import { mergeUpload, undoUpload, seedAdValues, setValue } from './upload.js';
+import { generateTitle, uniqueTitle, resolveTitle, priceK } from './title.js';
+import { normalizeReply, replyPrompt, askedFields, replyHasContent, validateReplyBody, buildGeminiReplyRequest, buildAnthropicReplyRequest, REPLY_SCHEMA } from './reply.js';
+import { nextStep } from './verdict.js';
+import { toColumns, fromRow } from './fields.js';
+import { normalizeExtraction, validateImages, buildGeminiRequest, buildAnthropicRequest, anthropicFileBlock, parseGeminiResponse, parseAnthropicResponse, EXTRACT_SCHEMA } from './extraction.js';
 
 const AS_OF = '2026-11-16';
 const S = (car) => scoreCar(car, { asOf: AS_OF });
@@ -573,8 +578,8 @@ test('Extract', 'schema requires every field and allows null', () => {
 test('Extract', 'image validation', () => {
   const ok = { mimeType: 'image/jpeg', data: 'QUJD'.repeat(40) };
   eq([validateImages([ok]), validateImages([]), validateImages([{ ...ok, mimeType: 'image/gif' }]),
-    validateImages([{ ...ok, data: 'not base64!' }]), validateImages(Array(7).fill(ok)), validateImages([{ ...ok, data: 'QUJD' }])],
-  [null, 'No images', 'Unsupported image type', 'Image data must be base64', 'At most 6 images', 'Image is empty']);
+    validateImages([{ ...ok, data: 'not base64!' }]), validateImages(Array(5).fill(ok)), validateImages([{ ...ok, data: 'QUJD' }])],
+  [null, 'No images', 'Unsupported image type', 'Image data must be base64', 'At most 4 images', 'Image is empty']);
 });
 test('Extract', 'Gemini request: images inline, JSON schema output', () => {
   const r = buildGeminiRequest([{ mimeType: 'image/png', data: 'QUJD' }]);
@@ -1103,6 +1108,213 @@ test('Registry scoring', 'km: max(ad, last test) feeds km/year; unknown ad km ke
   eq(range(S(effectiveCar(car, { lastTestKm: 25000 })).parts.mileage), [7, 7], '25,000 km in a year');
   const noKm = S(effectiveCar({ firstRegistration: '2025-11' }, { lastTestKm: 14000 }));
   eq([range(noKm.parts.mileage), noKm.notes.includes('km_from_last_test')], [[20, 20], true]);
+});
+
+// ---------------- PDF support ----------------
+
+test('Extract', 'PDFs are accepted next to images, 4 files at most', () => {
+  const img = { mimeType: 'image/png', data: 'QUJD'.repeat(40) };
+  const pdf = { mimeType: 'application/pdf', data: 'QUJD'.repeat(40) };
+  eq([validateImages([img, pdf, pdf, img]), validateImages([img, pdf, pdf, img, pdf]), validateImages([{ ...pdf, mimeType: 'application/zip' }])],
+    [null, 'At most 4 images', 'Unsupported image type']);
+});
+test('Extract', 'a PDF goes to Gemini as inline application/pdf, to Anthropic as a document block', () => {
+  const pdf = { mimeType: 'application/pdf', data: 'QUJD' };
+  eq(buildGeminiRequest([pdf]).contents[0].parts[1], { inlineData: { mimeType: 'application/pdf', data: 'QUJD' } });
+  const a = buildAnthropicRequest([pdf, { mimeType: 'image/png', data: 'QUJD' }], 'm').messages[0].content;
+  eq([a[0].type, a[0].source.media_type, a[1].type], ['document', 'application/pdf', 'image']);
+});
+
+// ---------------- Uploading to a saved car: add, not replace ----------------
+
+const SAVED_CAR = () => ({
+  currentKm: 85000, handCount: 2, trim: 'Sun', testExpiry: null, plate: '1234567', askingPrice: 70000,
+  dealBreakers: { structuralDamage: 'unknown', totalLoss: 'unknown', lien: 'unknown', sellerRefuses: 'unknown' },
+  fieldSources: { currentKm: 'screenshot', handCount: 'manual', trim: 'screenshot', plate: 'gov', askingPrice: 'manual' },
+  adValues: {},
+});
+test('Merge rules', 'empty fields are filled, with the upload\'s source', () => {
+  const m = mergeUpload(SAVED_CAR(), { testExpiry: '2027-03-01', originalOwnership: 'private' }, 'screenshot');
+  eq([m.filled, m.car.testExpiry, m.car.fieldSources.testExpiry, m.updated, m.conflicts], [['testExpiry', 'originalOwnership'], '2027-03-01', 'screenshot', [], []]);
+});
+test('Merge rules', 'a different value from an earlier screenshot is updated and reported', () => {
+  const m = mergeUpload(SAVED_CAR(), { currentKm: 87200, trim: 'sun' }, 'screenshot');
+  eq([m.car.currentKm, m.updated, m.conflicts], [87200, [{ key: 'currentKm', from: 85000, to: 87200 }], []]); // same trim (case) is no change
+});
+test('Merge rules', 'values typed by hand are never overwritten: they become conflicts', () => {
+  const m = mergeUpload(SAVED_CAR(), { handCount: 1, askingPrice: 65000 }, 'screenshot');
+  eq([m.car.handCount, m.car.askingPrice, m.updated, m.conflicts.map((c) => [c.key, c.mine, c.gov])], [2, 70000, [], [['handCount', 2, 1], ['askingPrice', 70000, 65000]]]);
+});
+test('Merge rules', 'registry values are never overwritten', () => {
+  const m = mergeUpload(SAVED_CAR(), { plate: '7654321' }, 'screenshot');
+  eq([m.car.plate, m.car.fieldSources.plate, m.conflicts.map((c) => c.key)], ['1234567', 'gov', ['plate']]);
+});
+test('Merge rules', 'a value without any source counts as typed: protected', () => {
+  const m = mergeUpload({ ...SAVED_CAR(), fieldSources: {} }, { currentKm: 99999 }, 'screenshot');
+  eq([m.car.currentKm, m.conflicts.length], [85000, 1]);
+});
+test('Merge rules', 'a seller reply updates an earlier screenshot value and marks it "seller"', () => {
+  const m = mergeUpload(SAVED_CAR(), { trim: 'Sun Roof' }, 'seller');
+  eq([m.car.trim, m.car.fieldSources.trim, m.updated[0].from], ['Sun Roof', 'seller', 'Sun']);
+});
+test('Merge rules', 'a seller\'s value can be refreshed by a later reply', () => {
+  const first = mergeUpload(SAVED_CAR(), { testExpiry: '2027-01-01' }, 'seller').car;
+  const second = mergeUpload(first, { testExpiry: '2027-06-01' }, 'seller');
+  eq([second.car.testExpiry, second.updated.length], ['2027-06-01', 1]);
+});
+test('Merge rules', 'deal-breakers: fill unknown, update a seller answer, keep a typed one', () => {
+  const car = { ...SAVED_CAR(), dealBreakers: { structuralDamage: 'no', totalLoss: 'unknown', lien: 'no', sellerRefuses: 'unknown' }, fieldSources: { 'dealBreakers.structuralDamage': 'manual', 'dealBreakers.lien': 'seller' } };
+  const m = mergeUpload(car, {}, 'seller', { dealBreakers: { structuralDamage: 'yes', totalLoss: 'no', lien: 'yes', sellerRefuses: null } });
+  eq([m.car.dealBreakers, m.filled, m.updated.map((u) => u.key), m.conflicts.map((c) => c.key)],
+    [{ structuralDamage: 'no', totalLoss: 'no', lien: 'yes', sellerRefuses: 'unknown' }, ['dealBreakers.totalLoss'], ['dealBreakers.lien'], ['dealBreakers.structuralDamage']]);
+});
+test('Merge rules', 'notes are appended, never a conflict, and not duplicated', () => {
+  const a = mergeUpload({ ...SAVED_CAR(), notes: 'first' }, { notes: 'second' }, 'screenshot');
+  eq([a.car.notes, a.conflicts], ['first\n\nsecond', []]);
+  eq(mergeUpload(a.car, { notes: 'second' }, 'screenshot').car.notes, 'first\n\nsecond');
+});
+test('Merge rules', 'the original ad values are kept: a later upload never replaces them', () => {
+  const first = mergeUpload({ dealBreakers: {}, fieldSources: {} }, { currentKm: 85000, handCount: 1 }, 'screenshot').car;
+  eq(first.adValues, { currentKm: 85000, handCount: 1 });
+  const later = mergeUpload(first, { currentKm: 87200 }, 'screenshot').car;
+  eq([later.currentKm, later.adValues.currentKm], [87200, 85000]);
+  const reply = mergeUpload(later, { handCount: 2 }, 'seller').car;
+  eq([reply.handCount, reply.adValues.handCount], [2, 1]);
+});
+test('Merge rules', 'a car saved before ad values existed: they are seeded from the current ad-side values first', () => {
+  const car = { ...SAVED_CAR(), fieldSources: { currentKm: 'screenshot', handCount: 'seller', trim: 'manual' } };
+  eq(seedAdValues(car), { currentKm: 85000, trim: 'Sun' }); // the seller's hand count is not the ad's
+  const m = mergeUpload(car, { currentKm: 90000 }, 'screenshot');
+  eq([m.car.currentKm, m.car.adValues.currentKm], [90000, 85000]);
+});
+test('Merge rules', 'undo restores values, sources, ad values and notes', () => {
+  const before = { ...SAVED_CAR(), notes: 'n' };
+  const m = mergeUpload(before, { currentKm: 87200, testExpiry: '2027-03-01', notes: 'more' }, 'screenshot', { dealBreakers: { lien: 'no' } });
+  const back = undoUpload(m.car, m.undo);
+  eq([back.currentKm, back.testExpiry, back.fieldSources, back.dealBreakers.lien, back.notes, back.adValues],
+    [85000, null, before.fieldSources, 'unknown', 'n', {}]);
+});
+test('Merge rules', 'setValue sets a field or a deal-breaker with a source', () => {
+  eq(setValue(SAVED_CAR(), 'trim', 'X', 'seller').fieldSources.trim, 'seller');
+  eq(setValue(SAVED_CAR(), 'dealBreakers.lien', 'yes', 'seller').dealBreakers.lien, 'yes');
+});
+test('Merge rules', 'ad values and title survive the column round trip; bad ad values are dropped', () => {
+  const car = sanitizeCar({ title: ' Corolla 2022 ', adValues: { currentKm: '85,000', trim: 'Sun', plate: '1', handCount: 'x' } });
+  eq([car.title, car.adValues], ['Corolla 2022', { currentKm: 85000, trim: 'Sun' }]);
+  const cols = toColumns(car);
+  eq([cols.title, cols.ad_values], ['Corolla 2022', '{"currentKm":85000,"trim":"Sun"}']);
+  const back = fromRow({ id: 'x', ...cols, field_sources: '{}', date_added: '2026-01-01', updated_at: 'x' });
+  eq([back.title, back.adValues], ['Corolla 2022', { currentKm: 85000, trim: 'Sun' }]);
+  eq(toColumns(sanitizeCar({})).ad_values, null);
+});
+
+// ---------------- Titles ----------------
+
+test('Title', 'price in thousands', () => eq([priceK(70000), priceK(72500), priceK(69950), priceK(0), priceK(null)], ['70k', '72.5k', '70k', null, null]));
+test('Title', 'automatic: "<Model> <year> · <location> · ₪<price in k>"', () => {
+  eq(generateTitle({ model: 'Corolla', year: 2022, location: 'Petah Tikva', askingPrice: 70000 }), 'Corolla 2022 · Petah Tikva · ₪70k');
+  eq(generateTitle({ make: 'Kia', year: 2020 }), 'Kia 2020');
+  eq(generateTitle({ model: 'Niro', askingPrice: 91500 }), 'Niro · ₪91.5k');
+  eq(generateTitle({}), null);
+});
+test('Title', 'unique: " (2)", " (3)" … when taken, case-insensitive', () => {
+  const t = 'Corolla 2022 · Petah Tikva · ₪70k';
+  eq(uniqueTitle(t, []), t);
+  eq(uniqueTitle(t, [t]), `${t} (2)`);
+  eq(uniqueTitle(t, [t, `${t} (2)`, 'other']), `${t} (3)`);
+  eq(uniqueTitle(t.toUpperCase(), [t]), `${t.toUpperCase()} (2)`);
+  eq(uniqueTitle(`${t} (2)`, [t, `${t} (2)`]), `${t} (3)`); // a typed suffix is replaced, not stacked
+  eq(uniqueTitle('  ', [t]), null);
+});
+test('Title', 'resolveTitle: own title wins (made unique), else the automatic one', () => {
+  const car = { model: 'Corolla', year: 2022, askingPrice: 70000 };
+  eq(resolveTitle(car, []), 'Corolla 2022 · ₪70k');
+  eq(resolveTitle({ ...car, title: 'My Corolla' }, []), 'My Corolla');
+  eq(resolveTitle({ ...car, title: '' }, ['Corolla 2022 · ₪70k']), 'Corolla 2022 · ₪70k (2)');
+  eq(resolveTitle({}, []), null);
+});
+
+// ---------------- Seller replies ----------------
+
+test('Seller reply', 'the checklist is what the message asked: plate first, then mismatches, then the missing details', () => {
+  eq(askedFields({}, []), ['plate', 'insuranceClaims', 'serviceHistory', 'testExpiry', 'originalOwnership', 'trim']);
+  eq(askedFields({ plate: '1234567', insuranceClaims: 'none', serviceHistory: 'full', testExpiry: '2027-01-01', originalOwnership: 'private', trim: 'Sun' }, []), []);
+  eq(askedFields({ plate: '1234567', trim: 'Sun', insuranceClaims: 'none', serviceHistory: 'full', testExpiry: '2027-01-01', originalOwnership: 'private' },
+    [{ code: 'fewerHands' }, { code: 'ownership' }, { code: 'odometer' }]), ['handCount', 'originalOwnership']);
+});
+test('Seller reply', 'a mocked model answer maps to fields, tiers and deal-breakers', () => {
+  const n = normalizeReply({ plate: '12-345-67', originalOwnership: 'private', handCount: 2, testExpiry: '2027-03', trim: ' Sun ',
+    serviceHistory: 'mostly', insuranceClaims: 'cosmetic', dealBreakers: { structuralDamage: 'no', totalLoss: null, lien: 'yes', sellerRefuses: 'maybe' }, notes: 'Will send photos tomorrow' });
+  eq(n.fields, { plate: '1234567', originalOwnership: 'private', handCount: 2, testExpiry: '2027-03-01', trim: 'Sun', serviceHistory: 'mostly', insuranceClaims: 'cosmetic' });
+  eq([n.dealBreakers, n.notes, replyHasContent(n)], [{ structuralDamage: 'no', totalLoss: null, lien: 'yes', sellerRefuses: null }, 'Will send photos tomorrow', true]);
+});
+test('Seller reply', 'invalid or unknown answers become null; an empty answer has no content', () => {
+  const n = normalizeReply({ originalOwnership: 'company', handCount: 99, insuranceClaims: 'huge', serviceHistory: 'some', plate: '1', testExpiry: 'soon' });
+  eq(Object.values(n.fields).every((v) => v === null), true);
+  eq([replyHasContent(n), replyHasContent(normalizeReply(null))], [false, false]);
+});
+test('Seller reply', 'the prompt carries the sent message and the questions asked; files are mentioned', () => {
+  const p = replyPrompt({ sent: 'היי, מה מספר הרישוי?', asked: ['plate', 'insuranceClaims'], text: 'כן 1234567', hasFiles: true });
+  eq([p.includes('היי, מה מספר הרישוי?'), p.includes('the license plate number'), p.includes('insurance claims'), p.includes('כן 1234567'), p.includes('attached files')], [true, true, true, true, true]);
+  eq(replyPrompt({}).includes('The seller\'s reply'), false);
+});
+test('Seller reply', 'schema: every field is required and nullable; provider requests carry files', () => {
+  eq(REPLY_SCHEMA.required.length, Object.keys(REPLY_SCHEMA.properties).length);
+  const pdf = { mimeType: 'application/pdf', data: 'QUJD' };
+  eq(buildGeminiReplyRequest('p', [pdf]).contents[0].parts[1], { inlineData: { mimeType: 'application/pdf', data: 'QUJD' } });
+  eq(buildAnthropicReplyRequest('p', [pdf], 'm').messages[0].content[0].type, 'document');
+});
+test('Seller reply', 'request needs text or a file', () => {
+  eq([validateReplyBody({}), validateReplyBody({ text: '  ' }), validateReplyBody({ text: 'כן' }), validateReplyBody({ files: [{}] }), validateReplyBody({ text: 'x'.repeat(9000) })],
+    ['Paste the reply or attach a file', 'Paste the reply or attach a file', null, null, 'Reply is too long']);
+});
+test('Seller reply', 'applied seller values show in a third column and follow the same suspicious rules', () => {
+  const reg = { handCount: 2, originalOwnership: 'rental', testExpiry: '2027-03-10' };
+  const car = { handCount: 1, originalOwnership: 'private', testExpiry: '2027-03-01',
+    adValues: { handCount: 1, originalOwnership: 'private', testExpiry: '2027-03-01' },
+    fieldSources: { handCount: 'seller', originalOwnership: 'seller', testExpiry: 'screenshot' } };
+  const rows = Object.fromEntries(comparisonRows(car, reg).map((r) => [r.key, r]));
+  eq([rows.handCount.seller, rows.handCount.sellerStatus, rows.handCount.sellerCode], [1, 'suspicious', 'fewerHands']);
+  eq([rows.originalOwnership.sellerStatus, rows.originalOwnership.sellerCode], ['suspicious', 'ownership']);
+  eq([rows.testExpiry.seller, rows.testExpiry.sellerStatus], [null, 'unknown']);
+  // the ad column keeps the original ad values, not the seller's
+  eq([rows.handCount.ad, rows.handCount.status], [1, 'suspicious']);
+});
+test('Seller reply', 'a seller answer that agrees with the registry is a match', () => {
+  const car = { handCount: 2, fieldSources: { handCount: 'seller' }, adValues: { handCount: 1 } };
+  const row = comparisonRows(car, { handCount: 2 }).find((r) => r.key === 'handCount');
+  eq([row.ad, row.status, row.seller, row.sellerStatus], [1, 'suspicious', 2, 'match']);
+});
+test('Seller reply', 'adValue: stored ad value wins; seller and registry values are not the ad', () => {
+  eq(adValue({ currentKm: 90000, adValues: { currentKm: 85000 }, fieldSources: { currentKm: 'screenshot' } }, 'currentKm'), 85000);
+  eq(adValue({ handCount: 2, fieldSources: { handCount: 'seller' } }, 'handCount'), null);
+  eq(adValue({ handCount: 2, fieldSources: { handCount: 'manual' } }, 'handCount'), 2);
+});
+
+// ---------------- Verdict next step ----------------
+
+test('Next step', 'quick check: pursue / maybe (top missing item) / skip (main reason) / not enough', () => {
+  const qc = (verdict, extra = {}) => ({ verdict, skip: [], maybe: [], ...extra });
+  eq(nextStep({ stage: 'quick', qc: qc('PURSUE') }), { kind: 'pursue', key: 'next.pursue' });
+  eq(nextStep({ stage: 'quick', qc: qc('MAYBE'), missing: ['insuranceClaims', 'trim'] }), { kind: 'maybe', key: 'next.maybe', field: 'insuranceClaims' });
+  eq(nextStep({ stage: 'quick', qc: qc('MAYBE') }).key, 'next.maybeGeneric');
+  eq(nextStep({ stage: 'quick', qc: qc('SKIP', { skip: [{ key: 'qc.skip.overBudget' }] }) }), { kind: 'skip', key: 'next.skip', reason: { key: 'qc.skip.overBudget' } });
+  eq(nextStep({ stage: 'quick', qc: qc('SKIP', { maybe: [{ key: 'qc.maybe.fleet' }] }) }).reason, { key: 'qc.maybe.fleet' }); // 3+ maybes
+  eq(nextStep({ stage: 'quick', qc: qc('NOT_ENOUGH') }), { kind: 'notEnough', key: 'next.notEnough' });
+});
+test('Next step', 'full score: strong buy → pursue, OK → maybe, avoid → skip with the reason, too early → not enough', () => {
+  const v = (kind, reason = null) => ({ kind, reason });
+  eq(nextStep({ stage: 'full', v: v('STRONG_BUY'), qc: {} }).kind, 'pursue');
+  eq(nextStep({ stage: 'full', v: v('OK'), qc: {}, missing: ['tires'] }).field, 'tires');
+  eq(nextStep({ stage: 'full', v: v('AVOID', 'dealBreaker'), qc: {} }).reason, { key: 'next.reason.dealBreaker' });
+  eq(nextStep({ stage: 'full', v: v('AVOID', 'lowMax'), qc: {} }).reason, { key: 'next.reason.lowMax' });
+  eq(nextStep({ stage: 'full', v: v('TOO_EARLY'), qc: {} }).kind, 'notEnough');
+});
+test('Next step', 'every next-step string exists in English and Hebrew', () => {
+  const keys = ['next.title', 'next.pursue', 'next.maybe', 'next.maybeGeneric', 'next.skip', 'next.notEnough', 'next.reason.dealBreaker', 'next.reason.lowMax', 'act.skip', 'act.contacted', 'act.skip.on', 'act.contacted.on', 'vs.seller', 'grp.reply', 'bar.range'];
+  eq(keys.filter((k) => !(k in STRINGS.en) || !(k in STRINGS.he)), []);
+  eq(STRINGS.en['next.pursue'], 'Worth contacting. Send the message below.');
+  eq(STRINGS.en['next.notEnough'], 'Add price, km or ownership to get a verdict.');
 });
 
 // ---------------- runner ----------------

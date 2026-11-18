@@ -38,3 +38,32 @@ export function verdict(r) {
   const hi = band(r.scoreMax);
   return { kind: lo, tone: TONE[lo], reason: null, provisional: lo !== hi, upTo: lo !== hi ? hi : null, known, barTone };
 }
+
+// ---------- the plain next step shown with the verdict ----------
+
+const QUICK_KIND = { PURSUE: 'pursue', MAYBE: 'maybe', SKIP: 'skip', NOT_ENOUGH: 'notEnough' };
+const FULL_KIND = { STRONG_BUY: 'pursue', OK: 'maybe', AVOID: 'skip', TOO_EARLY: 'notEnough' };
+
+/**
+ * One concrete next step per verdict. stage: 'quick' | 'full'; qc: quickCheck() result;
+ * v: verdict() result; missing: field keys still unknown, most useful first.
+ * Returns { kind, key, vars?, field?, reason? } — the UI turns it into text:
+ *   pursue     next.pursue
+ *   maybe      next.maybe with the top missing field (next.maybeGeneric if nothing is missing)
+ *   skip       next.skip with the main reason ({ key, vars } like the quick-check reasons)
+ *   notEnough  next.notEnough
+ */
+export function nextStep({ stage, qc, v, missing = [] }) {
+  const kind = stage === 'quick' ? QUICK_KIND[qc.verdict] : FULL_KIND[v.kind];
+  if (kind === 'pursue') return { kind, key: 'next.pursue' };
+  if (kind === 'maybe') {
+    return missing.length ? { kind, key: 'next.maybe', field: missing[0] } : { kind, key: 'next.maybeGeneric' };
+  }
+  if (kind === 'skip') {
+    const reason = stage === 'quick'
+      ? (qc.skip[0] || qc.maybe[0] || null)
+      : { key: v.reason === 'dealBreaker' ? 'next.reason.dealBreaker' : 'next.reason.lowMax' };
+    return { kind, key: 'next.skip', reason };
+  }
+  return { kind: 'notEnough', key: 'next.notEnough' };
+}

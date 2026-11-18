@@ -13,8 +13,13 @@ export const PROVIDERS = {
   anthropic: { defaultModel: 'claude-opus-5-5' },
 };
 
-export const MAX_IMAGES = 6;
+// Up to 4 files per upload, images and PDFs mixed. PDFs go to the model as-is.
+export const MAX_FILES = 4;
+export const MAX_IMAGES = MAX_FILES; // legacy name
 export const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+export const PDF_TYPE = 'application/pdf';
+export const FILE_TYPES = [...IMAGE_TYPES, PDF_TYPE];
+export const MAX_FILE_BASE64 = 8_000_000; // ≈ 6 MB per file
 
 // Fields we ask the model for. Deliberately excluded: insuranceClaims and
 // serviceHistory. An ad saying "no accidents" or "dealer serviced" is an
@@ -46,7 +51,7 @@ export const EXTRACT_SCHEMA = {
 };
 EXTRACT_SCHEMA.required = Object.keys(EXTRACT_SCHEMA.properties);
 
-export const EXTRACT_PROMPT = `You extract data from screenshots of a used-car listing on an Israeli site (Yad2, Facebook Marketplace, or a dealer). The text is usually Hebrew. All screenshots belong to the same listing.
+export const EXTRACT_PROMPT = `You extract data from screenshots (or PDFs) of a used-car listing on an Israeli site (Yad2, Facebook Marketplace, or a dealer). The text is usually Hebrew. All screenshots belong to the same listing.
 
 Return only JSON matching the schema. Use null for anything not clearly visible. Do not guess or infer:
 - Do not derive first registration from the model year, or the year from the registration.
@@ -61,13 +66,21 @@ Field rules:
 
 // ---------- provider requests ----------
 
+/** Gemini part for an image or a PDF (both are inline data). */
+export const geminiFilePart = (f) => ({ inlineData: { mimeType: f.mimeType, data: f.data } });
+
+/** Anthropic content block: images as `image`, PDFs as `document`. */
+export const anthropicFileBlock = (f) => (f.mimeType === PDF_TYPE
+  ? { type: 'document', source: { type: 'base64', media_type: PDF_TYPE, data: f.data } }
+  : { type: 'image', source: { type: 'base64', media_type: f.mimeType, data: f.data } });
+
 export function buildGeminiRequest(images) {
   return {
     contents: [{
       role: 'user',
       parts: [
         { text: EXTRACT_PROMPT },
-        ...images.map((im) => ({ inlineData: { mimeType: im.mimeType, data: im.data } })),
+        ...images.map(geminiFilePart),
       ],
     }],
     generationConfig: {
@@ -92,7 +105,7 @@ export function buildAnthropicRequest(images, model) {
     messages: [{
       role: 'user',
       content: [
-        ...images.map((im) => ({ type: 'image', source: { type: 'base64', media_type: im.mimeType, data: im.data } })),
+        ...images.map(anthropicFileBlock),
         { type: 'text', text: EXTRACT_PROMPT },
       ],
     }],
@@ -141,15 +154,19 @@ export function normalizeExtraction(raw) {
   return out;
 }
 
-/** Validate the request body: [{ mimeType, data(base64) }]. Returns an error string or null. */
-export function validateImages(images) {
+/**
+ * Validate uploaded files: [{ mimeType, data(base64) }], images and PDFs mixed.
+ * Returns an error string or null. With `optional`, a missing list is fine.
+ */
+export function validateImages(images, { optional = false } = {}) {
+  if (optional && (images === undefined || images === null)) return null;
   if (!Array.isArray(images) || images.length === 0) return 'No images';
-  if (images.length > MAX_IMAGES) return `At most ${MAX_IMAGES} images`;
+  if (images.length > MAX_FILES) return `At most ${MAX_FILES} images`;
   for (const im of images) {
-    if (!im || !IMAGE_TYPES.includes(im.mimeType)) return 'Unsupported image type';
+    if (!im || !FILE_TYPES.includes(im.mimeType)) return 'Unsupported image type';
     if (typeof im.data !== 'string' || !/^[A-Za-z0-9+/]+=*$/.test(im.data)) return 'Image data must be base64';
     if (im.data.length < 100) return 'Image is empty';
-    if (im.data.length > 8_000_000) return 'Image too large';
+    if (im.data.length > MAX_FILE_BASE64) return 'Image too large';
   }
   return null;
 }

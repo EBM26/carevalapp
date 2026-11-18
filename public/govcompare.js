@@ -70,10 +70,22 @@ function sameTrim(a, b) {
   return wa.every((w) => wb.includes(w)) || wb.every((w) => wa.includes(w));
 }
 
-/** What the ad (or the user) says for a field; values that came from the registry don't count. */
+/**
+ * What the AD (or the user, transcribing it) says for a field. The original ad
+ * value stored in car.adValues wins, so later uploads and seller replies never
+ * change it; values that came from the registry or the seller don't count as the ad.
+ */
 export function adValue(car, key) {
-  if (car.fieldSources?.[key] === 'gov') return null;
+  const stored = car.adValues?.[key];
+  if (stored !== undefined && stored !== null) return clean(key, stored);
+  const src = car.fieldSources?.[key];
+  if (src === 'gov' || src === 'seller') return null;
   return clean(key, car[key]);
+}
+
+/** What the seller said in a reply (applied values carry the source 'seller'). */
+export function sellerValue(car, key) {
+  return car.fieldSources?.[key] === 'seller' ? clean(key, car[key]) : null;
 }
 
 // ---------- applying registry data to the car ----------
@@ -114,33 +126,42 @@ export function applyRegistry(car, gov) {
 
 /**
  * car: the car (ad / manual values). reg: registry fields.
- * Returns [{ key, ad, reg, regDate?, status, code? }] in ROW_KEYS order.
+ * Returns [{ key, ad, reg, seller, regDate?, status, code?, sellerStatus, sellerCode? }] in
+ * ROW_KEYS order. `status`/`code` judge the ad against the registry; `sellerStatus`/`sellerCode`
+ * judge what the seller said against the registry with the very same rules.
  */
 export function comparisonRows(car, reg) {
   if (!reg) return [];
   const rows = [];
-  const row = (key, ad, regV, judge, extra = {}) => {
-    const r = { key, ad, reg: regV, ...extra };
-    if (ad === null || ad === undefined || regV === null || regV === undefined) r.status = 'unknown';
+  const row = (key, ad, regV, judge, extra = {}, seller = null) => {
+    const r = { key, ad, reg: regV, seller, ...extra };
+    const missing = (v) => v === null || v === undefined;
+    if (missing(ad) || missing(regV)) r.status = 'unknown';
     else Object.assign(r, judge(ad, regV));
+    if (missing(seller) || missing(regV)) r.sellerStatus = 'unknown';
+    else {
+      const j = judge(seller, regV);
+      r.sellerStatus = j.status;
+      if (j.code) r.sellerCode = j.code;
+    }
     rows.push(r);
   };
   row('handCount', adValue(car, 'handCount'), clean('handCount', reg.handCount), (a, g) => (
-    a === g ? { status: 'match' } : a < g ? { status: 'suspicious', code: 'fewerHands' } : { status: 'neutral' }));
+    a === g ? { status: 'match' } : a < g ? { status: 'suspicious', code: 'fewerHands' } : { status: 'neutral' }), {}, sellerValue(car, 'handCount'));
   row('originalOwnership', adValue(car, 'originalOwnership'), clean('originalOwnership', reg.originalOwnership), (a, g) => {
     if (a === g || (LEASE.has(a) && LEASE.has(g))) return { status: 'match' }; // the registry can't tell lease kinds apart
     if (a === 'private' && NOT_PRIVATE.has(g)) return { status: 'suspicious', code: 'ownership' };
     return { status: 'neutral' };
-  });
+  }, {}, sellerValue(car, 'originalOwnership'));
   row('km', adValue(car, 'currentKm'), clean('lastTestKm', reg.lastTestKm), (a, g) => (
     a < g ? { status: 'suspicious', code: 'odometer' } : { status: 'match' }), { regDate: clean('lastTestDate', reg.lastTestDate) });
   row('testExpiry', adValue(car, 'testExpiry'), clean('testExpiry', reg.testExpiry), (a, g) => (
     // ads often give only the month
-    a.slice(0, 7) === g.slice(0, 7) ? { status: 'match' } : { status: 'neutral' }));
+    a.slice(0, 7) === g.slice(0, 7) ? { status: 'match' } : { status: 'neutral' }), {}, sellerValue(car, 'testExpiry'));
   row('trim', adValue(car, 'trim'), clean('trim', reg.trim), (a, g) => {
     if (isHigherTrim(a, g)) return { status: 'suspicious', code: 'higherTrim' };
     return sameTrim(a, g) ? { status: 'match' } : { status: 'neutral' };
-  });
+  }, {}, sellerValue(car, 'trim'));
   return rows;
 }
 

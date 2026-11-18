@@ -8,6 +8,7 @@ export const SOURCES = ['manual', 'screenshot', 'gov', 'seller'];
 // [key, column, type, arg]
 export const FIELDS = [
   ['plate', 'plate', 'plate'],
+  ['title', 'title', 'text', 120],
   ['make', 'make', 'text'],
   ['model', 'model', 'text'],
   ['trim', 'trim', 'text'],
@@ -36,6 +37,10 @@ export const FIELDS = [
   ['sellerPhone', 'seller_phone', 'phone'],
   ['status', 'status', 'enum', ENUMS.status],
 ].map(([key, col, type, arg]) => ({ key, col, type, arg }));
+
+// Compared fields whose ORIGINAL ad value is stored apart from the working value
+// (car.adValues), so a later upload or seller reply never replaces what the ad said.
+export const AD_KEYS = ['handCount', 'originalOwnership', 'currentKm', 'testExpiry', 'trim'];
 
 export const DEAL_BREAKER_COLS = {
   structuralDamage: 'db_structural_damage',
@@ -121,7 +126,20 @@ export function sanitizeCar(input) {
   for (const [k, v] of Object.entries(fs)) {
     if (FIELD_KEYS.has(k) && SOURCES.includes(v)) car.fieldSources[k] = v;
   }
+  car.adValues = cleanAdValues(src.adValues);
   return car;
+}
+
+/** { key: value } for AD_KEYS only, each value cleaned by its field type. */
+export function cleanAdValues(input) {
+  const out = {};
+  const src = input && typeof input === 'object' ? input : {};
+  for (const k of AD_KEYS) {
+    const f = FIELDS.find((x) => x.key === k);
+    const v = cleanValue(f.type, src[k], f.arg);
+    if (v !== null) out[k] = v;
+  }
+  return out;
 }
 
 /** Car object → D1 column map (without id / dates / scores). */
@@ -136,6 +154,8 @@ export function toColumns(car) {
   }
   for (const k of DEAL_BREAKERS) cols[DEAL_BREAKER_COLS[k]] = car.dealBreakers?.[k] ?? 'unknown';
   cols.field_sources = JSON.stringify(car.fieldSources || {});
+  const ad = cleanAdValues(car.adValues);
+  cols.ad_values = Object.keys(ad).length ? JSON.stringify(ad) : null;
   return cols;
 }
 
@@ -152,6 +172,7 @@ export function fromRow(row) {
   car.dealBreakers = {};
   for (const k of DEAL_BREAKERS) car.dealBreakers[k] = row[DEAL_BREAKER_COLS[k]] || 'unknown';
   car.fieldSources = safeJson(row.field_sources, {});
+  car.adValues = cleanAdValues(row.ad_values ? safeJson(row.ad_values, {}) : {});
   car.dateAdded = row.date_added;
   car.updatedAt = row.updated_at;
   car.scoreMin = row.score_min;

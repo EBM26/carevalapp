@@ -1,11 +1,13 @@
 // app.js — UI and state. All visible text comes from i18n.js via t().
 import { scoreCar, ENUMS, DEAL_BREAKERS, num, RAW_TOTAL } from './scoring.js';
-import { FIELDS, sanitizeCar, cleanValue } from './fields.js';
+import { FIELDS, sanitizeCar, cleanValue, AD_KEYS } from './fields.js';
 import { STRINGS } from './i18n.js';
 import { buildSellerMessage, waNumber, sendWhatsApp } from './seller.js';
-import { mergeFields } from './govmap.js';
-import { MAX_IMAGES } from './extraction.js';
-import { verdict } from './verdict.js';
+import { MAX_FILES, PDF_TYPE, MAX_FILE_BASE64 } from './extraction.js';
+import { mergeUpload, undoUpload, setValue, seedAdValues } from './upload.js';
+import { askedFields, replyHasContent } from './reply.js';
+import { generateTitle } from './title.js';
+import { verdict, nextStep } from './verdict.js';
 import { summarize } from './summary.js';
 import { formatPlate } from './format.js';
 import { modelKey } from './modelnotes.js';
@@ -75,7 +77,7 @@ function setMenu(open) {
 }
 $('menuBtn').addEventListener('click', (e) => { e.stopPropagation(); setMenu($('menuPop').hidden); });
 document.addEventListener('click', (e) => { if (!e.target.closest('.menu')) setMenu(false); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { setMenu(false); } });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { setMenu(false); form?.closeSheet?.(); } });
 $('menuExport').addEventListener('click', () => { setMenu(false); exportJson(); });
 $('menuImport').addEventListener('click', () => { setMenu(false); $('importFile').click(); });
 $('menuSettings').addEventListener('click', () => { setMenu(false); location.hash = '#/settings'; });
@@ -165,6 +167,7 @@ async function api(method, path, body) {
 function route() {
   const hash = location.hash || '#/';
   view.classList.remove('editing');
+  document.body.classList.remove('sheet-open');
   if (hash === '#/new') return renderForm(null);
   if (hash === '#/settings') return renderSettings();
   const m = /^#\/edit\/([\w-]+)$/.exec(hash);
@@ -179,8 +182,9 @@ window.addEventListener('hashchange', () => {
 });
 
 // ---------- shared pieces ----------
+/** The car's own title; cars without one fall back to make / model / trim / year. */
 function carTitle(car) {
-  return [car.make, car.model, car.trim, car.year].filter(Boolean).join(' ') || t('untitled');
+  return car.title || [car.make, car.model, car.trim, car.year].filter(Boolean).join(' ') || t('untitled');
 }
 
 function plateBadge(plate, size = '') {
@@ -426,7 +430,7 @@ async function importJson(e) {
 // ---------- form view ----------
 // Groups in rubric order. `cat` = the scoring category whose points range shows in the header.
 const GROUPS = [
-  { key: 'car', cat: null, fields: ['plate', 'make', 'model', 'trim', 'year', 'location', 'status:full', 'listingUrl', 'notes:full'] },
+  { key: 'car', cat: null, fields: ['title:full', 'plate', 'make', 'model', 'trim', 'year', 'location', 'status:full', 'listingUrl', 'notes:full'] },
   { key: 'seller', cat: null, fields: ['sellerName', 'sellerPhone'] },
   { key: 'history', cat: 'history', fields: ['insuranceClaims:full', 'serviceHistory:full'] },
   { key: 'price', cat: 'price', fields: ['askingPrice', 'benchmark'] },
@@ -446,7 +450,7 @@ const ENUM_I18N = {
   benchmarkSource: 'bench',
 };
 const UNITS = { askingPrice: '₪', benchmarkPrice: '₪', yad2Low: '₪', yad2High: '₪', currentKm: 'km', lastTestKm: 'km' };
-const HINTS = { insuranceClaims: 'hint.insuranceClaims', serviceHistory: 'hint.serviceHistory' };
+const HINTS = { insuranceClaims: 'hint.insuranceClaims', serviceHistory: 'hint.serviceHistory', title: 'title.hint' };
 
 function enumLabel(key, v) {
   const short = `segShort.${key}.${v}`;
@@ -500,7 +504,7 @@ async function renderForm(id) {
       draft = structuredClone(car);
     }
     // Seller message language defaults to Hebrew regardless of the UI language.
-    form = { id, draft, sellerLang: 'he', notes: null, seller: { status: 'idle', text: '', version: 0 }, estimate: null, gov: null, govPlate: null, adIdentity: { ...(draft.registry?.ad || {}) } };
+    form = { id, draft, sellerLang: 'he', notes: null, seller: { status: 'idle', text: '', version: 0 }, reply: { text: '', files: [], status: 'idle' }, asked: null, estimate: null, gov: null, govPlate: null, adIdentity: { ...(draft.registry?.ad || {}) } };
     if (draft.registry?.fields) form.gov = { status: 'done', fields: draft.registry.fields, stored: true };
     const ek = estimateKey(draft);
     if (draft.priceEstimate && ek && draft.priceEstimate.key === ek) {
@@ -516,6 +520,7 @@ async function renderForm(id) {
   view.classList.add('editing');
 
   const panel = h('aside.panel', { 'aria-label': t('panel.title') });
+  const backdrop = h('div.sheet-backdrop', { hidden: true, onclick: () => setSheet(false) });
   const sellerBox = h('section.panel-sec.seller');
   const govBox = h('div.gov-box');
   const shotStatus = h('div.start-status', { 'aria-live': 'polite' });
@@ -523,11 +528,13 @@ async function renderForm(id) {
   const benchBox = h('div.field.full.bench');
   const pointsEls = {};
   const headPlate = h('span.head-plate', {}, plateBadge(draft.plate, 'lg'));
+  const headTitle = h('h1.head-title', { dir: 'auto' }, draft.title?.trim() || t(id ? 'editCar' : 'newCar'));
   const kpyEl = h('span.kpy', { 'aria-live': 'polite' }); // read-only km/year next to the km field
 
   // ----- value display (conflicts) -----
   function displayValue(key, v) {
     if (v === null || v === undefined || v === '') return t('unknown');
+    if (key.startsWith('dealBreakers.')) return t(`tri.${v}`);
     if (key === 'ownershipHistory') return v.map((o) => (o?.type ? t(`ownershipType.${o.type}`) : '?')).join(', ');
     if (ENUM_I18N[key]) return t(`${ENUM_I18N[key]}.${v}`);
     if (key === 'plate') return formatPlate(v);
@@ -621,21 +628,34 @@ async function renderForm(id) {
   function renderVs(rows) {
     vsBox.hidden = !rows.length;
     if (!rows.length) { vsBox.replaceChildren(); return; }
+    // "Seller says" appears once a seller reply has been applied.
+    const hasSeller = rows.some((r) => r.seller !== null && r.seller !== undefined);
+    const bad = (row) => row.status === 'suspicious' || row.sellerStatus === 'suspicious';
     vsBox.replaceChildren(
       h('div.group-head', {}, h('h2', { id: 'h-vs' }, t('vs.title'))),
-      h('div.vs-table', { role: 'table', 'aria-labelledby': 'h-vs' },
+      h(`div.vs-table${hasSeller ? '.has-seller' : ''}`, { role: 'table', 'aria-labelledby': 'h-vs' },
         h('div.vs-row.vs-head', { role: 'row' },
           h('span', { role: 'columnheader' }, t('vs.field')),
           h('span', { role: 'columnheader' }, t('vs.ad')),
-          h('span', { role: 'columnheader' }, t('vs.registry'))),
-        rows.map((row) => h(`div.vs-row.${row.status}`, { role: 'row' },
-          h('span.vs-field', { role: 'rowheader' },
-            h(`span.vs-icon.${row.status}`, { role: 'img', 'aria-label': t(`vs.status.${row.status}`), title: t(`vs.status.${row.status}`) }, STATUS_ICON[row.status]),
-            t(`vs.row.${row.key}`)),
-          h('span.vs-val', { role: 'cell', 'data-label': t('vs.ad') }, vsValue(row.key, row.ad, 'ad', row)),
-          h('span.vs-val', { role: 'cell', 'data-label': t('vs.registry') }, vsValue(row.key, row.reg, 'reg', row)),
-          row.status === 'suspicious' ? h('span.vs-why', { role: 'cell' }, t('vs.status.suspicious')) : null))),
-      h('p.vs-note', {}, t('vs.note')));
+          h('span', { role: 'columnheader' }, t('vs.registry')),
+          hasSeller ? h('span', { role: 'columnheader' }, t('vs.seller')) : null),
+        rows.map((row) => {
+          const tone = bad(row) ? 'suspicious' : row.status;
+          const whys = [
+            row.status === 'suspicious' ? [t('vs.ad'), t('vs.status.suspicious')] : null,
+            row.sellerStatus === 'suspicious' ? [t('vs.seller'), t('vs.status.suspicious')] : null,
+          ].filter(Boolean);
+          return h(`div.vs-row.${tone}`, { role: 'row' },
+            h('span.vs-field', { role: 'rowheader' },
+              h(`span.vs-icon.${tone}`, { role: 'img', 'aria-label': t(`vs.status.${tone}`), title: t(`vs.status.${tone}`) }, STATUS_ICON[tone]),
+              t(`vs.row.${row.key}`)),
+            h('span.vs-val', { role: 'cell', 'data-label': t('vs.ad') }, vsValue(row.key, row.ad, 'ad', row)),
+            h('span.vs-val', { role: 'cell', 'data-label': t('vs.registry') }, vsValue(row.key, row.reg, 'reg', row)),
+            hasSeller ? h(`span.vs-val.seller${row.sellerStatus === 'suspicious' ? '.suspicious' : ''}`, { role: 'cell', 'data-label': t('vs.seller') },
+              vsValue(row.key, row.seller, 'seller', row)) : null,
+            ...whys.map(([who, why]) => h('span.vs-why', { role: 'cell' }, hasSeller ? `${who}: ${why}` : why)));
+        })),
+      h('p.vs-note', {}, t('vs.note'), hasSeller ? ` ${t('vs.noteSeller')}` : ''));
   }
 
   function trustValue(key, v) {
@@ -645,26 +665,26 @@ async function renderForm(id) {
     return displayValue(key, v);
   }
 
-  // Shared by gov lookup and screenshot import. stateKey: 'gov' | 'shot'.
-  const SOURCE_OF = { gov: 'gov', shot: 'screenshot' };
+  // Shared by gov lookup, screenshot import and seller reply. stateKey: 'gov' | 'shot' | 'reply'.
+  const SOURCE_OF = { gov: 'gov', shot: 'screenshot', reply: 'seller' };
+  const fieldLabel = (key) => (key.startsWith('dealBreakers.') ? t(`db.${key.slice(13)}`) : t(`field.${key}`));
   function resolveConflict(stateKey, c, useTheirs) {
-    if (useTheirs) {
-      draft[c.key] = c.gov;
-      draft.fieldSources = { ...draft.fieldSources, [c.key]: SOURCE_OF[stateKey] };
-    }
+    if (useTheirs) Object.assign(draft, setValue(draft, c.key, c.gov, SOURCE_OF[stateKey]));
     form[stateKey].conflicts = form[stateKey].conflicts.filter((x) => x !== c);
-    if (useTheirs) renderForm(id); else (stateKey === 'gov' ? renderGov() : renderShot());
+    if (useTheirs) renderForm(id);
+    else if (stateKey === 'gov') renderGov(); else if (stateKey === 'shot') renderShot(); else renderReply();
   }
 
   function conflictList(stateKey) {
     const st = form[stateKey];
     if (!st?.conflicts?.length) return [];
-    const p = stateKey === 'gov' ? { title: 'gov.conflicts', theirs: 'gov.gov', use: 'gov.useGov' }
-      : { title: 'shot.conflicts', theirs: 'shot.theirs', use: 'shot.useTheirs' };
+    const p = { gov: { title: 'gov.conflicts', theirs: 'gov.gov', use: 'gov.useGov' },
+      shot: { title: 'shot.conflicts', theirs: 'shot.theirs', use: 'shot.useTheirs' },
+      reply: { title: 'reply.conflicts', theirs: 'reply.theirs', use: 'reply.useTheirs' } }[stateKey];
     return [
       h('strong.small', {}, t(p.title)),
       ...st.conflicts.map((c) => h('div.conflict', {},
-        h('div.conflict-label', {}, t(`field.${c.key}`)),
+        h('div.conflict-label', {}, fieldLabel(c.key)),
         h('div.conflict-vals', {},
           h('span', {}, t('gov.yours'), ': ', h('bdi', { dir: 'auto' }, displayValue(c.key, c.mine))),
           h('span', {}, t(p.theirs), ': ', h('bdi', { dir: 'auto' }, displayValue(c.key, c.gov)))),
@@ -674,16 +694,46 @@ async function renderForm(id) {
     ];
   }
 
-  // ----- screenshot import -----
-  const shotInput = h('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true, onchange: importShots });
+  /** "3 fields updated: km 85,000 → 87,200 …" with one Undo. null when nothing was updated. */
+  function changeSummary(change, onUndo) {
+    const upd = change?.updated || [];
+    if (!upd.length) return null;
+    const items = upd.slice(0, 3).map((u) => {
+      const numeric = typeof u.from === 'number' && typeof u.to === 'number';
+      const arrow = numeric || lang === 'en' ? '→' : '←'; // reads from → to in either direction
+      return h('span.chg', {}, fieldLabel(u.key), ' ',
+        h('bdi', { dir: numeric ? 'ltr' : 'auto' }, `${displayValue(u.key, u.from)} ${arrow} ${displayValue(u.key, u.to)}`));
+    });
+    const head = t(upd.length === 1 ? 'imp.updatedOne' : 'imp.updated', { n: upd.length, list: '' }).trim();
+    return h('div.import-summary', { role: 'status' },
+      h('span.import-text', {}, head, ' ', items.flatMap((x, i) => (i ? [', ', x] : [x])),
+        upd.length > 3 ? [', ', t('imp.more', { n: upd.length - 3 })] : null),
+      h('button.btn.small', { type: 'button', onclick: onUndo }, t('imp.undo')));
+  }
+
+  /** Undo the last import or applied reply (state = form.shot | form.reply). */
+  function undoChange(state) {
+    if (!state?.change) return;
+    Object.assign(draft, undoUpload(draft, state.change.undo));
+    state.change = null;
+    toast(t('imp.undone'));
+    renderForm(id);
+  }
+
+  // ----- screenshot / PDF import -----
+  const shotInput = h('input', { type: 'file', accept: 'image/*,application/pdf', multiple: true, hidden: true, onchange: importShots });
+
+  const thumbOf = (f) => ({ url: isPdfFile(f) ? null : URL.createObjectURL(f), pdf: isPdfFile(f), name: f.name });
+  const revokeThumbs = (thumbs) => { for (const th of thumbs || []) if (th.url) URL.revokeObjectURL(th.url); };
 
   async function importShots(e) {
     const files = [...e.target.files];
     e.target.value = '';
     if (!files.length) return;
-    if (files.length > MAX_IMAGES) { form.shot = { status: 'error', message: t('shot.tooMany', { n: MAX_IMAGES }) }; renderShot(); return; }
-    for (const u of form.shot?.thumbs || []) URL.revokeObjectURL(u);
-    runExtraction(files, files.map((f) => URL.createObjectURL(f)));
+    const bad = checkFiles(files);
+    if (bad) { form.shot = { status: 'error', message: bad }; renderShot(); return; }
+    revokeThumbs(form.shot?.thumbs);
+    runExtraction(files, files.map(thumbOf));
   }
 
   async function runExtraction(files, thumbs) {
@@ -691,17 +741,19 @@ async function renderForm(id) {
     form.shot = { status: 'loading', files, thumbs };
     renderShot();
     try {
-      // Wrapped: map() would pass the index as fileToJpeg's maxSide argument.
-      const images = await Promise.all(files.map((f) => fileToJpeg(f)));
+      // Wrapped: map() would pass the index as the second argument.
+      const images = await Promise.all(files.map((f) => fileToPayload(f)));
       const res = await api('POST', '/api/extract', { images });
       if (form !== session) return;
-      const m = mergeFields(draft, res.fields, 'screenshot');
+      // Adds to the car: fills empty fields, updates earlier screenshot/seller values,
+      // never touches typed or registry values (those become conflicts).
+      const m = mergeUpload(draft, res.fields, 'screenshot');
       Object.assign(draft, m.car);
-      form.shot = { status: 'done', files, thumbs, filled: m.filled, conflicts: m.conflicts, noteUntil: Date.now() + 5000 };
-      form.pulseKeys = m.filled; // filled fields pulse once after the re-render
+      form.shot = { status: 'done', files, thumbs, filled: m.filled, conflicts: m.conflicts, change: { filled: m.filled, updated: m.updated, undo: m.undo }, noteUntil: Date.now() + 5000 };
+      form.pulseKeys = [...m.filled, ...m.updated.map((u) => u.key)].filter((k) => !k.startsWith('dealBreakers.')); // pulse once after the re-render
     } catch (err) {
       if (form !== session) return;
-      form.shot = { status: 'error', files, thumbs, message: isAiLimit(err) ? t('ai.limit') : t('shot.errorShort'), detail: err.message };
+      form.shot = { status: 'error', files, thumbs, message: isAiLimit(err) ? t('ai.limit') : err.fileError || t('shot.errorShort'), detail: err.message };
     }
     renderForm(id);
   }
@@ -711,8 +763,9 @@ async function renderForm(id) {
     const loading = s.status === 'loading';
     const kids = [];
     if (s.thumbs?.length) {
-      kids.push(h('div.thumbs', {}, s.thumbs.map((url, i) =>
-        h(`div.thumb${loading ? '.shimmer' : ''}`, {}, h('img', { src: url, alt: t('shot.thumbAlt', { n: i + 1 }) })))));
+      kids.push(h('div.thumbs', {}, s.thumbs.map((th, i) =>
+        h(`div.thumb${loading ? '.shimmer' : ''}${th.pdf ? '.pdf' : ''}`, { title: th.name || null },
+          th.pdf ? h('span.pdf-badge', {}, 'PDF') : h('img', { src: th.url, alt: t('shot.thumbAlt', { n: i + 1 }) })))));
     }
     if (loading) kids.push(h('div.reading', { role: 'status' }, spinner(), h('span', {}, t('shot.readingStatus'))));
     if (s.status === 'error') {
@@ -720,9 +773,12 @@ async function renderForm(id) {
         s.files?.length ? h('button.btn.small', { type: 'button', onclick: () => runExtraction(s.files, s.thumbs) }, t('shot.retry')) : null));
     }
     if (s.status === 'done') {
+      const updated = s.change?.updated?.length || 0;
+      const summary = changeSummary(s.change, () => undoChange(form.shot));
+      if (summary) kids.push(summary);
       const left = s.noteUntil - Date.now();
-      if (left > 0) {
-        const note = h('div.note', {}, t(s.filled.length || s.conflicts.length ? 'shot.applied' : 'shot.none', { n: s.filled.length }));
+      if (left > 0 && (s.filled.length || !(s.conflicts.length || updated))) {
+        const note = h('div.note', {}, t(s.filled.length ? (s.filled.length === 1 ? 'shot.appliedOne' : 'shot.applied') : 'shot.none', { n: s.filled.length }));
         kids.push(note);
         setTimeout(() => { note.classList.add('fade'); setTimeout(() => note.remove(), 160); }, left);
       }
@@ -733,11 +789,171 @@ async function renderForm(id) {
     if (upBtn) upBtn.disabled = loading;
   }
 
+  // ----- seller reply: answers by hand, or paste / upload and apply -----
+  const replyBox = h('section.group.reply', { id: 'grp-reply', 'aria-labelledby': 'h-reply' });
+  const checklistEl = h('ul.asks');
+  const replyInput = h('input', { type: 'file', accept: 'image/*,application/pdf', multiple: true, hidden: true, onchange: addReplyFiles });
+  const REPLY_ENUMS = ['insuranceClaims', 'serviceHistory', 'originalOwnership'];
+  const REPLY_ORDER = ['plate', 'originalOwnership', 'handCount', 'testExpiry', 'trim', 'serviceHistory', 'insuranceClaims'];
+  const filledValue = (key) => draft[key] !== null && draft[key] !== undefined && draft[key] !== '';
+
+  /** An answer typed or picked by hand counts as the seller's. */
+  function answerByHand(key, value) {
+    draft.adValues = seedAdValues(draft); // keep what the ad said before the seller's answer lands
+    const v = value === '' ? null : value;
+    Object.assign(draft, setValue(draft, key, v, 'seller'));
+    if (v === null) { const fs = { ...draft.fieldSources }; delete fs[key]; draft.fieldSources = fs; }
+    renderForm(id);
+  }
+
+  function answerControl(key) {
+    if (REPLY_ENUMS.includes(key)) {
+      const sg = seg(`q-${key}`, FIELD_BY_KEY[key].arg.map((v) => [v, enumLabel(key, v)]), draft[key] ?? '', { small: true, label: fieldLabel(key) });
+      sg.addEventListener('input', (e) => answerByHand(key, e.target.value));
+      return sg;
+    }
+    const raw = draft[key] ?? '';
+    const attrs = { name: `q-${key}`, type: 'text', autocomplete: 'off', value: String(raw), 'aria-label': fieldLabel(key) };
+    if (key === 'plate') Object.assign(attrs, { inputmode: 'numeric', dir: 'ltr', value: raw ? formatPlate(raw) || raw : '' });
+    else if (key === 'handCount') attrs.inputmode = 'numeric';
+    else if (key === 'testExpiry') attrs.type = 'date';
+    else attrs.dir = 'auto';
+    const input = h('input', attrs);
+    input.addEventListener('change', () => answerByHand(key, input.value));
+    return input;
+  }
+
+  /** The questions from the sent message as a checklist; answered ones are ticked. */
+  function renderChecklist() {
+    const car = buildCar(draft);
+    const live = askedFields(car, trustIssues(car, currentSnapshot()));
+    // Keep answered questions on the list: remember every question seen (or the sent message's).
+    form.asked = [...new Set([...(form.asked || []), ...live])];
+    const items = form.asked.map((key) => {
+      const done = filledValue(key);
+      return h(`li.ask${done ? '.done' : ''}`, {},
+        h('div.ask-head', {},
+          h(`span.vs-icon.${done ? 'match' : 'unknown'}`, { 'aria-hidden': 'true' }, done ? '✓' : '–'),
+          h('span.ask-name', {}, fieldLabel(key), srcTag(key)),
+          h('span.ask-state', {}, t(done ? 'reply.answered' : 'reply.pending'))),
+        answerControl(key));
+    });
+    checklistEl.replaceChildren(...(items.length ? items : [h('li.note', {}, t('reply.noQuestions'))]));
+    fitSegs(checklistEl);
+  }
+
+  const previewItems = (res) => {
+    const val = (k, v) => {
+      if (k === 'plate') return formatPlate(v) || v;
+      if (k === 'originalOwnership') return t(`ownershipType.${v}`);
+      if (k === 'serviceHistory' || k === 'insuranceClaims') return enumLabel(k, v);
+      if (k === 'testExpiry') return fmtDate(v);
+      return String(v);
+    };
+    return [
+      ...REPLY_ORDER.filter((k) => res.fields[k] !== null && res.fields[k] !== undefined)
+        .map((k) => [t(`reply.short.${k}`), val(k, res.fields[k])]),
+      ...DEAL_BREAKERS.filter((k) => res.dealBreakers[k]).map((k) => [t(`db.${k}`), t(`tri.${res.dealBreakers[k]}`)]),
+    ];
+  };
+
+  function renderReply() {
+    const r = form.reply;
+    const loading = r.status === 'loading';
+    const ta = h('textarea', { name: 'replyText', rows: 4, dir: 'auto', value: r.text, placeholder: t('reply.placeholder'), 'aria-label': t('reply.paste') });
+    ta.addEventListener('input', () => { r.text = ta.value; });
+    const chips = r.files.map((f, i) => h('span.file-chip', {},
+      h('bdi', { dir: 'auto' }, f.name),
+      h('button.chip-x', { type: 'button', 'aria-label': t('reply.removeFile', { name: f.name }), onclick: () => { r.files.splice(i, 1); renderReply(); } }, '×')));
+    const out = [];
+    if (r.status === 'error') out.push(h('div.warn-text', { title: r.detail || null }, r.message));
+    if (loading) out.push(h('div.reading', { role: 'status' }, spinner(), h('span', {}, t('reply.reading'))));
+    if (r.status === 'empty') out.push(h('div.note', {}, t('reply.empty')));
+    if (r.status === 'done' && r.result) {
+      const items = previewItems(r.result);
+      out.push(h('div.reply-preview', {},
+        h('strong.small', {}, t('reply.preview')),
+        h('ul.preview', {}, items.map(([k, v]) => h('li', {}, h('span.preview-k', {}, k), ' ', h('bdi.preview-v', { dir: 'auto' }, v)))),
+        r.result.notes ? h('p.note', {}, `${t('reply.notes')}: `, h('bdi', { dir: 'auto' }, r.result.notes)) : null,
+        h('div.reply-actions', {},
+          h('button.btn.primary', { type: 'button', onclick: applyReply }, t('reply.apply')),
+          h('button.btn', { type: 'button', onclick: () => { form.reply = { ...r, status: 'idle', result: null }; renderReply(); } }, t('reply.discard')))));
+    }
+    if (r.status === 'applied') {
+      out.push(h('div.note', {}, t('reply.applied', { n: r.appliedN })));
+      const summary = changeSummary(r.change, () => undoChange(form.reply));
+      if (summary) out.push(summary);
+      out.push(...conflictList('reply'));
+    }
+    replyBox.replaceChildren(
+      h('div.group-head', {}, h('h2', { id: 'h-reply' }, t('grp.reply'))),
+      h('p.note', {}, t('reply.hint')),
+      h('div.reply-block', {}, h('h3.reply-sub', {}, t('reply.questions')), checklistEl),
+      h('div.reply-block', {},
+        h('label.reply-sub', { for: 'replyText' }, t('reply.paste')),
+        ta,
+        h('div.reply-files', {}, ...chips,
+          h('button.btn.small', { type: 'button', disabled: loading, onclick: () => replyInput.click() }, ICON.upload(), t('reply.addFiles'))),
+        h('div.reply-actions', {}, h('button.btn.small.primary', { type: 'button', disabled: loading, onclick: parseReply }, t(loading ? 'reply.reading' : 'reply.read')))),
+      ...out);
+    ta.id = 'replyText';
+    renderChecklist();
+  }
+
+  function addReplyFiles(e) {
+    const files = [...e.target.files];
+    e.target.value = '';
+    if (!files.length) return;
+    const r = form.reply;
+    const all = [...r.files, ...files];
+    const bad = checkFiles(all);
+    if (bad) { form.reply = { ...r, status: 'error', message: bad }; } else { form.reply = { ...r, files: all, status: r.status === 'error' ? 'idle' : r.status }; }
+    renderReply();
+  }
+
+  async function parseReply() {
+    const r = form.reply;
+    const text = r.text.trim();
+    if (!text && !r.files.length) { form.reply = { ...r, status: 'error', message: t('reply.needInput') }; renderReply(); return; }
+    const session = form;
+    form.reply = { ...r, status: 'loading' };
+    renderReply();
+    try {
+      const car = buildCar(draft);
+      const files = await Promise.all(r.files.map((f) => fileToPayload(f)));
+      const res = await api('POST', '/api/parse-reply', {
+        text, files: files.length ? files : undefined,
+        sent: form.seller.text || '', // the questions that were in the sent message
+        asked: form.asked?.length ? form.asked : askedFields(car, trustIssues(car, currentSnapshot())),
+      });
+      if (form !== session) return;
+      form.reply = { ...form.reply, status: replyHasContent(res) ? 'done' : 'empty', result: res };
+    } catch (err) {
+      if (form !== session) return;
+      form.reply = { ...form.reply, status: 'error', message: isAiLimit(err) ? t('ai.limit') : t('reply.error'), detail: err.message };
+    }
+    renderReply();
+  }
+
+  /** Apply the previewed answers: source 'seller', same merge rules as an upload. */
+  function applyReply() {
+    const r = form.reply;
+    const res = r.result;
+    if (!res) return;
+    const fields = { ...res.fields, notes: res.notes ? `${t('grp.reply')}: ${res.notes}` : null };
+    const m = mergeUpload(draft, fields, 'seller', { dealBreakers: res.dealBreakers });
+    Object.assign(draft, m.car);
+    form.reply = { text: '', files: [], status: 'applied', appliedN: m.filled.length + m.updated.length, conflicts: m.conflicts, change: { filled: m.filled, updated: m.updated, undo: m.undo } };
+    form.pulseKeys = [...m.filled, ...m.updated.map((u) => u.key)].filter((k) => !k.startsWith('dealBreakers.'));
+    renderForm(id);
+  }
+
   // ----- fields -----
   function srcTag(key) {
     const src = draft.fieldSources?.[key];
     if (src === 'screenshot') return h('span.src-tag', {}, t('src.screenshotTag'));
     if (src === 'gov') return h('span.src-tag.gov', {}, t('src.govTag'));
+    if (src === 'seller') return h('span.src-tag.seller', {}, t('src.sellerTag'));
     return null;
   }
 
@@ -769,11 +985,12 @@ async function renderForm(id) {
       if (n !== null) attrs.value = fmt.format(n);
     }
     if (f.type === 'plate') attrs.value = raw ? formatPlate(raw) || raw : '';
+    if (key === 'title') Object.assign(attrs, { dir: 'auto', maxlength: '120', placeholder: id ? '' : t('title.auto') });
     if (f.type === 'ym') Object.assign(attrs, { type: 'month', placeholder: 'YYYY-MM' });
     else if (f.type === 'date') attrs.type = 'date';
     else if (f.type === 'url') Object.assign(attrs, { type: 'url', inputmode: 'url', dir: 'ltr' });
     else if (f.type === 'phone') Object.assign(attrs, { type: 'tel', dir: 'ltr' });
-    else if (f.type === 'text') attrs.dir = 'auto';
+    else if (f.type === 'text' && key !== 'title') attrs.dir = 'auto';
     const input = h('input', attrs);
     if (!UNITS[key]) return input;
     return h('span.unit-field', {}, input, h('span.unit', { 'aria-hidden': 'true' }, UNITS[key] === 'km' ? t('unit.km') : '₪'));
@@ -851,7 +1068,9 @@ async function renderForm(id) {
   const formEl = h('form', { novalidate: true, onsubmit: (e) => { e.preventDefault(); save(); } },
     groupEls[0],
     vsBox,
-    groupEls.slice(1),
+    groupEls[1],
+    replyBox,
+    groupEls.slice(2),
     h('div.form-actions', {},
       saveBtn(),
       h('a.btn', { href: '#/' }, t('cancel')),
@@ -884,12 +1103,19 @@ async function renderForm(id) {
       draft.ownershipHistory = hist;
       draft.fieldSources = { ...draft.fieldSources, ownershipHistory: 'manual' };
     } else if (name in FIELD_BY_KEY) {
+      // Typing over an ad value restates what the ad said; a seller's value is not the ad's.
+      if (AD_KEYS.includes(name) && draft.fieldSources?.[name] !== 'seller') {
+        const ad = { ...(draft.adValues || {}) };
+        if (String(e.target.value).trim()) ad[name] = e.target.value; else delete ad[name];
+        draft.adValues = ad;
+      }
       draft[name] = e.target.value;
       const fld = e.target.closest('.field');
       fld?.classList.remove('from-shot');
       fld?.querySelector(':scope > .label .src-tag')?.remove();
       draft.fieldSources = { ...draft.fieldSources, [name]: 'manual' };
     } else return;
+    if (name === 'title') headTitle.textContent = draft.title?.trim() || t(id ? 'editCar' : 'newCar');
     if (name === 'handCount') renderOwners();
     if (name === 'benchmarkSource') { renderBenchmark(); fitSegs(benchBox); }
     if (name === 'plate') { headPlate.replaceChildren(plateBadge(draft.plate, 'lg')); scheduleGov(); }
@@ -946,6 +1172,7 @@ async function renderForm(id) {
     const car = buildCar(draft);
     const { qc, trust } = currentQuick(car);
     const session = form;
+    form.asked = askedFields(car, trust); // the questions this message asks: the reply checklist
     form.seller = { ...form.seller, status: 'loading' };
     renderSeller(car, qc);
     let text;
@@ -1033,16 +1260,17 @@ async function renderForm(id) {
     return form.gov?.fields ? { fields: form.gov.fields, ad: form.adIdentity } : null;
   }
 
-  function quickSection(car, qc, comparison, est, asHeadline) {
+  function quickSection(car, qc, comparison, est, asHeadline, head = null) {
     const cmpInfo = comparisonText(car, comparison, est);
     const joined = qc.reasons.map((r) => reasonText(r)).join(', ');
     const reasons = joined ? joined[0].toLocaleUpperCase(lang) + joined.slice(1) : ''; // sentence case
     const body = [
       asHeadline ? h('div.stage-label', {}, t('stage.quick')) : null,
       asHeadline ? h('div.verdict-main', {}, h(`span.verdict-word.${VERDICT_TONE[qc.verdict]}`, {}, qcLabel(qc))) : null,
-      qc.verdict === 'NOT_ENOUGH' ? h('div.verdict-sub', {}, t('qc.notEnough')) : null,
-      asHeadline ? (reasons ? h('div.qc-reasons', {}, h('bdi', { dir: 'auto' }, reasons)) : (qc.verdict === 'NOT_ENOUGH' ? null : h('div.verdict-sub', {}, t('qc.fromAd'))))
+      asHeadline && head ? head.step : null,
+      asHeadline ? (reasons ? h('div.qc-reasons', {}, h('bdi', { dir: 'auto' }, reasons)) : null)
         : h('div.qc-reasons', {}, h('bdi', { dir: 'auto' }, qcLine(qc))),
+      asHeadline && head ? head.actions : null,
       ...qc.notes.map((n) => h('div.qc-note', {}, t(n.key))),
       est && (est.status === 'loading' || est.status === 'scheduled') && num(car.askingPrice) !== null
         ? skeleton('load.estimate')
@@ -1053,11 +1281,23 @@ async function renderForm(id) {
     return body;
   }
 
+  /** Open / close the bottom sheet (phones). The page behind is dimmed and doesn't scroll. */
+  function setSheet(open, rerender = true) {
+    form.panelOpen = open;
+    panel.classList.toggle('expanded', open);
+    backdrop.hidden = !open;
+    document.body.classList.toggle('sheet-open', open);
+    const toggle = panel.querySelector('.panel-toggle');
+    if (toggle && rerender) {
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.setAttribute('aria-label', t(open ? 'panel.close' : 'panel.open'));
+    }
+  }
+
   function focusField(key) {
     const el = formEl.querySelector(`[name="${key}"]`) || formEl.querySelector(`[data-field="${key}"] input`);
     if (!el) return;
-    form.panelOpen = false;
-    panel.classList.remove('expanded');
+    setSheet(false);
     el.scrollIntoView({ block: 'center' });
     el.focus({ preventScroll: true });
   }
@@ -1072,6 +1312,33 @@ async function renderForm(id) {
       body.hidden = !form[stateKey];
     });
     return [btn, body];
+  }
+
+  // ----- next step + status actions -----
+  const sentenceCase = (txt) => (txt ? txt[0].toLocaleUpperCase(lang) + txt.slice(1) : txt);
+
+  function stepText(step) {
+    if (step.key === 'next.maybe') return t('next.maybe', { item: t(`field.${step.field}`).toLocaleLowerCase(lang) });
+    if (step.key === 'next.skip') {
+      const why = step.reason ? sentenceCase(reasonText(step.reason)) : t('qc.verdict.SKIP');
+      return t('next.skip', { reason: why });
+    }
+    return t(step.key);
+  }
+
+  /** Mark the car skipped / contacted: sets the status field (saved with the car). */
+  function setStatus(value) {
+    const radio = formEl.querySelector(`input[name="status"][value="${value}"]`);
+    if (radio) { radio.checked = true; radio.dispatchEvent(new Event('input', { bubbles: true })); } else { draft.status = value; renderPanel(); }
+    toast(t('act.done', { status: t(`status.${value}`) }));
+  }
+
+  /** Two clearly labelled buttons, separate from the verdict badge. */
+  function statusActions() {
+    const cur = draft.status || 'considering';
+    const btn = (value, key) => h('button.btn.act', { type: 'button', disabled: cur === value, 'aria-pressed': String(cur === value), onclick: () => setStatus(value) },
+      t(cur === value ? `${key}.on` : key));
+    return h('div.actions', {}, btn('rejected', 'act.skip'), btn('contacted', 'act.contacted'));
   }
 
   // ----- score panel -----
@@ -1106,6 +1373,12 @@ async function renderForm(id) {
 
     const sections = [];
 
+    // Top missing items (for "Ask about …" and the "Find out next" tags).
+    const missing = [];
+    for (const step of r.nextSteps) for (const f of step.fields) if (!missing.includes(f)) missing.push(f);
+    const step = nextStep({ stage: quickStage ? 'quick' : 'full', qc, v, missing });
+    const head = { step: h('p.next-step', { class: step.kind }, h('span.next-label', {}, t('next.title')), ' ', h('bdi', { dir: 'auto' }, stepText(step))), actions: statusActions() };
+
     // 0. Seller trust: the ad makes the car look better than the registry.
     if (trust.length) {
       sections.push(h('section.panel-sec.trust', { role: 'alert' },
@@ -1127,7 +1400,7 @@ async function renderForm(id) {
 
     // Below 50% coverage: quick check is the headline, then the seller message (stage 2).
     if (quickStage) {
-      sections.push(h('section.panel-sec.quick', {}, quickSection(car, qc, comparison, est, true)));
+      sections.push(h('section.panel-sec.quick', {}, quickSection(car, qc, comparison, est, true, head)));
       sections.push(sellerBox);
     }
 
@@ -1136,9 +1409,11 @@ async function renderForm(id) {
     sections.push(h(`section.panel-sec.verdict${quickStage ? '.full-later' : ''}`, {},
       quickStage ? h('div.stage-label', {}, t('stage.full')) : null,
       h('div.verdict-main', {}, word, v.upTo ? h('span.verdict-up', {}, t('verdict.possibly', { rating: t(`rating.${v.upTo}`) })) : null),
+      quickStage ? null : head.step,
       v.kind === 'TOO_EARLY' ? h('div.verdict-sub', {}, ltrNums(t('verdict.pointsSoFar', { x: v.known.x, y: v.known.y }))) : null,
       h('div.verdict-sub', {}, ltrNums(t('verdict.range', { min: r.scoreMin, max: r.scoreMax, n: r.coverage }))),
-      scoreBar(r, v)));
+      scoreBar(r, v),
+      quickStage ? null : head.actions));
 
     // 3. Good signs / Watch out (+ known issues for this model).
     const key = modelKey(car);
@@ -1172,8 +1447,6 @@ async function renderForm(id) {
     sections.push(h('section.panel-sec.signs', {}, signs, issuesCtl));
 
     // 4. Find out next: top 3 missing items as tags.
-    const missing = [];
-    for (const step of r.nextSteps) for (const f of step.fields) if (!missing.includes(f)) missing.push(f);
     if (missing.length) {
       sections.push(h('section.panel-sec', {}, h('h3', {}, t('panel.findOut')),
         h('div.tags', {}, missing.slice(0, 3).map((f) => h('button.tag', { type: 'button', onclick: () => focusField(f) }, t(`field.${f}`))))));
@@ -1201,22 +1474,20 @@ async function renderForm(id) {
       sections.push(sellerBox);
     }
 
-    // Mobile summary bar (fixed bottom): verdict, range, coverage, Save.
+    // Mobile bar (fixed bottom), one row: verdict badge + score range, then Save.
+    // Tapping the verdict opens the bottom sheet (next step, summary, breakdown, status buttons).
     const toggle = h('button.panel-toggle', { type: 'button', 'aria-expanded': String(Boolean(form.panelOpen)), 'aria-label': t(form.panelOpen ? 'panel.close' : 'panel.open') },
-      h('span.line', {}, quickStage ? qcBadge(qc) : verdictBadge(v), h('span.stage', {}, t(quickStage ? 'stage.quickShort' : 'stage.fullShort')), ltrNums(t('verdict.rangeShort', { min: r.scoreMin, max: r.scoreMax, n: r.coverage })), hasFlag(r) ? flagIcon() : null),
-      scoreBar(r, v));
-    toggle.addEventListener('click', () => {
-      form.panelOpen = !form.panelOpen;
-      panel.classList.toggle('expanded', form.panelOpen);
-      toggle.setAttribute('aria-expanded', String(form.panelOpen));
-      toggle.setAttribute('aria-label', t(form.panelOpen ? 'panel.close' : 'panel.open'));
-    });
+      quickStage ? qcBadge(qc) : verdictBadge(v),
+      h('span.range', {}, ltr(t('bar.range', { min: r.scoreMin, max: r.scoreMax }))),
+      h('span.bar-chev', { 'aria-hidden': 'true' }, ICON.chev()));
+    toggle.addEventListener('click', () => setSheet(!form.panelOpen));
     const mobileSave = saveButtons.find((b) => b.classList.contains('save-bar')) || saveBtn('.save-bar');
-    panel.classList.toggle('expanded', Boolean(form.panelOpen));
+    setSheet(Boolean(form.panelOpen), false);
     // Keep the reader's place: on phones the sheet body scrolls, and it's rebuilt here.
     const prevScroll = panel.querySelector('.panel-body')?.scrollTop || 0;
     const body = h('div.panel-body', {}, sections);
     panel.replaceChildren(h('div.panel-summary', {}, toggle, mobileSave), body);
+    if (!replyBox.contains(document.activeElement)) renderChecklist(); // ticks follow the fields
     if (prevScroll) body.scrollTop = prevScroll;
     fitSegs(sellerBox);
   }
@@ -1258,19 +1529,22 @@ async function renderForm(id) {
   view.replaceChildren(
     h('div.edit-head', {},
       h('a.btn.link', { href: '#/', style: 'padding-inline:0' }, t('back')),
-      h('h1', {}, t(id ? 'editCar' : 'newCar')),
+      headTitle,
       headPlate,
       h('span.spacer'),
       saveBtn('.save-top')),
     h('div.edit-layout', {},
       h('div.edit-main', {}, shotInput, start, shotStatus, formEl),
+      backdrop,
       panel));
   // Async work (AI calls, registry) may finish after the form was rebuilt:
   // they redraw through these hooks, which always point at the current DOM.
   form.rerender = () => renderPanel();
+  form.closeSheet = () => setSheet(false);
   form.fetchGov = (force) => fetchGov(force);
   renderGov();
   renderShot();
+  renderReply();
   renderPanel();
   scheduleGov(); // plate already valid (typed earlier, extracted, or a saved car) → registry lookup
   requestAnimationFrame(() => fitSegs(view));
@@ -1332,6 +1606,29 @@ function fmtVars(vars) {
   const out = {};
   for (const [k, v] of Object.entries(vars)) out[k] = typeof v === 'number' ? fmt.format(v) : v;
   return out;
+}
+
+const isPdfFile = (f) => f.type === PDF_TYPE || /\.pdf$/i.test(f.name || '');
+
+/** An error message for a bad pick (too many, wrong type, too big), or null. Images and PDFs, mixed. */
+function checkFiles(files) {
+  if (files.length > MAX_FILES) return t('shot.tooMany', { n: MAX_FILES });
+  if (files.some((f) => !isPdfFile(f) && !String(f.type).startsWith('image/'))) return t('shot.badType');
+  if (files.some((f) => isPdfFile(f) && (f.size * 4) / 3 > MAX_FILE_BASE64)) return t('shot.tooLarge');
+  return null;
+}
+
+/** One file → { mimeType, data(base64) }. Images are downscaled to JPEG; PDFs are sent as they are. */
+async function fileToPayload(file) {
+  try {
+    if (!isPdfFile(file)) return await fileToJpeg(file);
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return { mimeType: PDF_TYPE, data: btoa(bin) };
+  } catch (e) {
+    throw Object.assign(e, { fileError: t('shot.readFailed') });
+  }
 }
 
 /** Downscale and re-encode an image file → { mimeType, data(base64) }. Keeps uploads small. */
