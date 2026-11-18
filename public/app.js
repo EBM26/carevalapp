@@ -12,7 +12,7 @@ import { summarize } from './summary.js';
 import { formatPlate } from './format.js';
 import { modelKey } from './modelnotes.js';
 import { applyRegistry, comparisonRows, trustIssues, effectiveCar } from './govcompare.js';
-import { quickCheck, resolveComparison, estimateKey, QUICK_CHECK_UNTIL, VERDICT_ORDER, VERDICT_TONE } from './quickcheck.js';
+import { quickCheck, resolveComparison, estimateKey, QUICK_CHECK_UNTIL, VERDICT_ORDER, VERDICT_TONE, VERDICT_QCLASS } from './quickcheck.js';
 
 // ---------- storage (per-device conveniences only; D1 is the source of truth) ----------
 const store = {
@@ -246,7 +246,7 @@ function quickFor(car, { estimate = car.priceEstimate, pending = false, snapshot
 const reasonText = (r, l = lang) => tIn(l, r.key, r.vars);
 const qcLabel = (qc) => t(`qc.verdict.${qc.verdict}`);
 const qcLine = (qc) => (qc.reasons.length ? t('qc.line', { verdict: qcLabel(qc), reasons: qc.reasons.map((r) => reasonText(r)).join(', ') }) : qcLabel(qc));
-const qcBadge = (qc) => h(`span.badge.${VERDICT_TONE[qc.verdict]}`, { title: qcLine(qc) }, qcLabel(qc));
+const qcBadge = (qc) => h(`span.badge.${VERDICT_QCLASS[qc.verdict]}`, { title: qcLine(qc) }, qcLabel(qc));
 
 /** Headline for a car: the quick check below 50% coverage, the full score from 50%. */
 function headline(car, r, v, qc) {
@@ -1269,7 +1269,7 @@ async function renderForm(id) {
     const reasons = joined ? joined[0].toLocaleUpperCase(lang) + joined.slice(1) : ''; // sentence case
     const body = [
       asHeadline ? h('div.stage-label', {}, t('stage.quick')) : null,
-      asHeadline ? h('div.verdict-main', {}, h(`span.verdict-word.${VERDICT_TONE[qc.verdict]}`, {}, qcLabel(qc))) : null,
+      asHeadline ? h('div.verdict-main', {}, h(`span.verdict-word.${VERDICT_QCLASS[qc.verdict]}`, {}, qcLabel(qc))) : null,
       asHeadline && head ? head.step : null,
       asHeadline ? (reasons ? h('div.qc-reasons', {}, h('bdi', { dir: 'auto' }, reasons)) : null)
         : h('div.qc-reasons', {}, h('bdi', { dir: 'auto' }, qcLine(qc))),

@@ -15,6 +15,7 @@ export const KM_PRICE_ADJUST = 0.15;   // ₪ per km of difference from the comp
 export const PRICE_BAND = 5;           // % above/below the comparison that counts
 
 export const VERDICT_ORDER = { PURSUE: 0, MAYBE: 1, NOT_ENOUGH: 2, SKIP: 3 };
+export const VERDICT_QCLASS = { PURSUE: 'q-pursue', MAYBE: 'q-maybe', SKIP: 'q-skip', NOT_ENOUGH: 'q-none' };
 export const VERDICT_TONE = { PURSUE: 'good', MAYBE: 'ok', SKIP: 'bad', NOT_ENOUGH: 'neutral' };
 export const MIN_KNOWN = 2; // of: price comparison, km/year, ownership
 
